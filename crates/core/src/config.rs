@@ -14,3 +14,15 @@ impl Default for ServerConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_server_config() {
+        let config = ServerConfig::default();
+        assert_eq!(config.listen_addr, "0.0.0.0:5999");
+        assert_eq!(config.data_path, "./data");
+    }
+}
