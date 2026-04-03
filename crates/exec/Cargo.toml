@@ -1,0 +1,13 @@
+[package]
+name = "exec"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+core = { path = "../core" }
+storage = { path = "../storage" }
+serde_json = "1.0"
+tracing = "0.1"

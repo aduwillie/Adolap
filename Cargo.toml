@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "crates/core",
+  "crates/storage",
+  "crates/exec",
+  "crates/protocol",
+  "crates/server",
+  "crates/cli",
+]
+
+resolver = "2" # Use the new Cargo feature resolver to allow for more flexible dependency management across workspace members.
