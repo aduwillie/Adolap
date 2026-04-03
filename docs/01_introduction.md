@@ -214,10 +214,11 @@ This is one of the strongest “database book” qualities in the project: the c
 
 ## How to read the rest of the book
 
-The next chapters move from outermost concerns to inner mechanics:
+The most effective reading order is:
 
-1. Chapter 2 shows how to set up, build, and run the system locally.
-2. Chapter 3 explains storage and persistence.
-3. Chapter 4 explains the query language and planning path.
-4. Chapter 5 explains networking, the server, and the CLI.
-5. Chapter 6 walks through an end-to-end example and maps each step back to the code.
+1. Read `docs/architecture.md` next for the system-wide component map and the main request flows.
+2. Use Chapter 2 for setup, build, run, and local inspection workflow.
+3. Use Chapter 3 for storage and persistence internals.
+4. Use Chapter 4 for the query language, binding, and physical planning path.
+5. Use Chapter 5 for networking, server dispatch, and CLI behavior.
+6. Use Chapter 6 for an end-to-end walkthrough that reconnects all of the above.

@@ -240,13 +240,14 @@ cargo test -p server
 
 ## Documentation guide
 
-The `docs/` directory is organized like a short database book. Start with the introduction and continue in order.
+The `docs/` directory is organized like a short database book plus one architecture map. Start with the introduction, read the architecture overview, then continue into the component chapters.
 
 | Chapter | Summary |
 | --- | --- |
 | [docs/01_introduction.md](docs/01_introduction.md) | Project goals, mental model, workspace overview, and how the crates fit together. |
+| [docs/architecture.md](docs/architecture.md) | System-wide architecture, request flows, crate boundaries, design decisions, and current limitations. |
 | [docs/02_setup_and_local_development.md](docs/02_setup_and_local_development.md) | Detailed local setup, build, run, test, and common day-to-day development scenarios. |
-| [docs/03_storage_engine.md](docs/03_storage_engine.md) | Catalog, schemas, record batches, table writing, segment layout, stats, and pruning. |
+| [docs/03_storage_engine.md](docs/03_storage_engine.md) | Detailed storage theory, design decisions, on-disk layout, write path, metadata, and pruning implementation. |
 | [docs/04_query_language_and_planning.md](docs/04_query_language_and_planning.md) | AQL syntax, parsing, logical plans, optimization, binding, and physical planning. |
 | [docs/05_protocol_server_and_cli.md](docs/05_protocol_server_and_cli.md) | Binary protocol, TCP framing, request lifecycle, server dispatch, and CLI behavior. |
 | [docs/06_end_to_end_walkthrough.md](docs/06_end_to_end_walkthrough.md) | A tutorial-style chapter with sample data, queries, inspection commands, and architecture mapping. |
@@ -256,11 +257,12 @@ The `docs/` directory is organized like a short database book. Start with the in
 If you want to understand the codebase deeply, use this sequence:
 
 1. Read [docs/01_introduction.md](docs/01_introduction.md).
-2. Set up the project with [docs/02_setup_and_local_development.md](docs/02_setup_and_local_development.md).
-3. Study persistence in [docs/03_storage_engine.md](docs/03_storage_engine.md).
-4. Study planning in [docs/04_query_language_and_planning.md](docs/04_query_language_and_planning.md).
-5. Study networking and tooling in [docs/05_protocol_server_and_cli.md](docs/05_protocol_server_and_cli.md).
-6. Run the tutorial in [docs/06_end_to_end_walkthrough.md](docs/06_end_to_end_walkthrough.md).
+2. Read [docs/architecture.md](docs/architecture.md) for the system-wide component map and request flows.
+3. Set up the project with [docs/02_setup_and_local_development.md](docs/02_setup_and_local_development.md).
+4. Study persistence in [docs/03_storage_engine.md](docs/03_storage_engine.md).
+5. Study planning in [docs/04_query_language_and_planning.md](docs/04_query_language_and_planning.md).
+6. Study networking and tooling in [docs/05_protocol_server_and_cli.md](docs/05_protocol_server_and_cli.md).
+7. Run the tutorial in [docs/06_end_to_end_walkthrough.md](docs/06_end_to_end_walkthrough.md).
 
 ## Current status
 
