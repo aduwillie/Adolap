@@ -1,8 +1,3 @@
-//! Filesystem-backed catalog for databases and tables.
-//!
-//! The catalog prefers the canonical `data/<db>/<table>` layout while still
-//! resolving legacy default-database tables stored directly under `data/<table>`.
-
 use crate::{
     config::TableStorageConfig,
     naming::TABLE_CONFIG_FILE_NAME,
@@ -45,9 +40,9 @@ pub struct Catalog {
 
 impl Catalog {
     /// Create a catalog rooted at a data directory.
-    pub fn new(data_root: impl Into<PathBuf>) -> Self {
+    pub fn new(data_root: PathBuf) -> Self {
         Self {
-            data_root: data_root.into(),
+            data_root,
         }
     }
 
@@ -81,6 +76,8 @@ impl Catalog {
                 has_legacy_default_tables = true;
                 continue;
             }
+
+            tracing::debug!("Discovered database '{}' at {}", name, &path.display());
 
             databases.insert(
                 name.to_string(),
@@ -400,4 +397,248 @@ fn validate_identifier(value: &str, kind: &str) -> Result<(), AdolapError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{ColumnSchema, ColumnType};
+    use tempfile::TempDir;
+    use tokio::runtime::Runtime;
+
+    fn temp_catalog() -> (TempDir, Catalog) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let catalog = Catalog::new(temp_dir.path().to_path_buf());
+        (temp_dir, catalog)
+    }
+
+    fn sample_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_string(),
+                    column_type: ColumnType::U32,
+                    nullable: false,
+                },
+                ColumnSchema {
+                    name: "name".to_string(),
+                    column_type: ColumnType::Utf8,
+                    nullable: true,
+                },
+            ],
+        }
+    }
+
+    async fn create_legacy_table(
+        data_root: &Path,
+        table: &str,
+        schema: &TableSchema,
+        storage_config: Option<&TableStorageConfig>,
+    ) -> PathBuf {
+        let table_path = data_root.join(table);
+        fs::create_dir_all(&table_path).await.unwrap();
+        schema.save(&table_path.join(SCHEMA_FILE_NAME)).await.unwrap();
+        if let Some(storage_config) = storage_config {
+            storage_config
+                .save(&table_path.join(TABLE_CONFIG_FILE_NAME))
+                .await
+                .unwrap();
+        }
+        table_path
+    }
+
+    fn run_async_test<F>(future: F)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        Runtime::new().unwrap().block_on(future);
+    }
+
+    #[test]
+    fn test_split_table_reference() {
+        assert_eq!(
+            split_table_reference("db.table").unwrap(),
+            ("db".to_string(), "table".to_string())
+        );
+        assert_eq!(
+            split_table_reference("  db  .  table  ").unwrap(),
+            ("db".to_string(), "table".to_string())
+        );
+        assert_eq!(
+            split_table_reference("table").unwrap(),
+            (DEFAULT_DATABASE_NAME.to_string(), "table".to_string())
+        );
+        assert!(split_table_reference("").is_err());
+        assert!(split_table_reference("invalid-table").is_err());
+        assert!(split_table_reference("invalid.table.name").is_err());
+    }
+
+    #[test]
+    fn list_databases_includes_canonical_and_synthetic_default() {
+        run_async_test(async {
+            let (_temp_dir, catalog) = temp_catalog();
+            let schema = sample_schema();
+            let storage_config = TableStorageConfig::default();
+
+            catalog.create_database("warehouse").await.unwrap();
+            catalog
+                .create_table("analytics.events", &schema, &storage_config)
+                .await
+                .unwrap();
+            create_legacy_table(catalog.data_root(), "visits", &schema, None).await;
+
+            let databases = catalog.list_databases().await.unwrap();
+            let names = databases
+                .iter()
+                .map(|database| database.name.as_str())
+                .collect::<Vec<_>>();
+
+            assert_eq!(names, vec!["analytics", "default", "warehouse"]);
+            assert_eq!(
+                databases
+                    .iter()
+                    .find(|database| database.name == DEFAULT_DATABASE_NAME)
+                    .unwrap()
+                    .path,
+                catalog.data_root().join(DEFAULT_DATABASE_NAME)
+            );
+        });
+    }
+
+    #[test]
+    fn list_tables_discovers_canonical_and_legacy_tables() {
+        run_async_test(async {
+            let (_temp_dir, catalog) = temp_catalog();
+            let schema = sample_schema();
+            let storage_config = TableStorageConfig::default();
+
+            catalog
+                .create_table("analytics.events", &schema, &storage_config)
+                .await
+                .unwrap();
+            create_legacy_table(
+                catalog.data_root(),
+                "visits",
+                &schema,
+                Some(&storage_config),
+            )
+            .await;
+
+            let tables = catalog.list_tables().await.unwrap();
+            let names = tables.iter().map(TableMetadata::fqn).collect::<Vec<_>>();
+
+            assert_eq!(names, vec!["analytics.events", "default.visits"]);
+            assert_eq!(tables[0].schema.columns.len(), 2);
+            assert_eq!(tables[1].storage_config.row_group_size, storage_config.row_group_size);
+        });
+    }
+
+    #[test]
+    fn database_exists_treats_default_as_virtual_for_legacy_tables() {
+        run_async_test(async {
+            let (_temp_dir, catalog) = temp_catalog();
+            let schema = sample_schema();
+
+            create_legacy_table(catalog.data_root(), "visits", &schema, None).await;
+            catalog.create_database("analytics").await.unwrap();
+
+            assert!(catalog.database_exists(DEFAULT_DATABASE_NAME).await.unwrap());
+            assert!(catalog.database_exists("analytics").await.unwrap());
+            assert!(!catalog.database_exists("missing").await.unwrap());
+        });
+    }
+
+    #[test]
+    fn resolve_table_prefers_canonical_default_path_over_legacy_fallback() {
+        run_async_test(async {
+            let (_temp_dir, catalog) = temp_catalog();
+            let schema = sample_schema();
+            let storage_config = TableStorageConfig::default();
+
+            let legacy_path = create_legacy_table(catalog.data_root(), "orders", &schema, None).await;
+            let canonical = catalog
+                .create_table("default.orders", &schema, &storage_config)
+                .await
+                .unwrap();
+
+            let resolved = catalog.resolve_table("orders").await.unwrap();
+
+            assert_eq!(resolved.path, canonical.path);
+            assert_ne!(resolved.path, legacy_path);
+            assert_eq!(resolved.fqn(), "default.orders");
+        });
+    }
+
+    #[test]
+    fn resolve_insert_target_requires_name_when_zero_or_multiple_tables_exist() {
+        run_async_test(async {
+            let (_temp_dir, catalog) = temp_catalog();
+
+            match catalog.resolve_insert_target(None).await.unwrap_err() {
+                AdolapError::ExecutionError(message) => {
+                    assert!(message.contains("no tables were found"));
+                }
+                other => panic!("expected execution error, got {:?}", other),
+            }
+
+            let schema = sample_schema();
+            let storage_config = TableStorageConfig::default();
+            let only_table = catalog
+                .create_table("analytics.events", &schema, &storage_config)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                catalog.resolve_insert_target(None).await.unwrap().fqn(),
+                only_table.fqn()
+            );
+
+            catalog
+                .create_table("analytics.users", &schema, &storage_config)
+                .await
+                .unwrap();
+
+            match catalog.resolve_insert_target(None).await.unwrap_err() {
+                AdolapError::ExecutionError(message) => {
+                    assert!(message.contains("more than one table exists"));
+                }
+                other => panic!("expected execution error, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn drop_default_database_removes_canonical_and_legacy_tables_only() {
+        run_async_test(async {
+            let (_temp_dir, catalog) = temp_catalog();
+            let schema = sample_schema();
+            let storage_config = TableStorageConfig::default();
+
+            let canonical_default = catalog
+                .create_table("default.orders", &schema, &storage_config)
+                .await
+                .unwrap();
+            let legacy_default = create_legacy_table(catalog.data_root(), "visits", &schema, None).await;
+            let analytics_table = catalog
+                .create_table("analytics.events", &schema, &storage_config)
+                .await
+                .unwrap();
+
+            let dropped_count = catalog.drop_database(DEFAULT_DATABASE_NAME).await.unwrap();
+
+            assert_eq!(dropped_count, 2);
+            assert!(fs::metadata(&canonical_default.path).await.is_err());
+            assert!(fs::metadata(&legacy_default).await.is_err());
+            assert!(fs::metadata(&analytics_table.path).await.is_ok());
+
+            let remaining_tables = catalog
+                .list_tables()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|table| table.fqn())
+                .collect::<Vec<_>>();
+            assert_eq!(remaining_tables, vec!["analytics.events"]);
+        });
+    }
 }

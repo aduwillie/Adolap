@@ -12,6 +12,8 @@ It covers three things for each major area:
 
 Adolap's storage layer is intentionally compact, but it is not trivial. It already includes a real catalog, immutable segments, row-group chunking, per-column metadata, compression, dictionary encoding for strings, bloom filters, null bitmaps, and metadata-driven pruning.
 
+For a focused walkthrough of the Bloom filter implementation, including the bit math, sizing intuition, and the bit packing technique used by the persisted representation, see [Chapter 7: Bloom Filters](07_bloom_filters.md).
+
 ## The storage problem Adolap is solving
 
 Any database storage layer needs to answer the same basic questions:

@@ -1,0 +1,29 @@
+{
+  "columns": [
+    {
+      "name": "event_id",
+      "column_type": "U32",
+      "nullable": false
+    },
+    {
+      "name": "country",
+      "column_type": "Utf8",
+      "nullable": false
+    },
+    {
+      "name": "device",
+      "column_type": "Utf8",
+      "nullable": false
+    },
+    {
+      "name": "revenue",
+      "column_type": "I32",
+      "nullable": false
+    },
+    {
+      "name": "is_paying",
+      "column_type": "Bool",
+      "nullable": false
+    }
+  ]
+}

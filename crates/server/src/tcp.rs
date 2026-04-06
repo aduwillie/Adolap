@@ -1,6 +1,8 @@
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task;
 use adolap_core::error::AdolapError;
+use std::path::PathBuf;
+use storage::background_compaction::BackgroundCompactionScheduler;
 use tracing::{debug, error, info, warn};
 
 use protocol::framing::{read_frame, write_frame};
@@ -12,6 +14,8 @@ pub async fn start_server(addr: &str) -> Result<(), AdolapError> {
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| AdolapError::ExecutionError(format!("Bind error: {}", e)))?;
+
+    let _background_compaction = BackgroundCompactionScheduler::new(PathBuf::from("data")).spawn();
 
     info!(%addr, "server listening");
     println!("Adolap server listening on {}", addr);

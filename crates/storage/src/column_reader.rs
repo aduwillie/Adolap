@@ -178,3 +178,280 @@ impl ColumnChunkReader {
         Ok(ColumnValuesOwned::Bool(values))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        column::{ColumnChunkDescriptor, ColumnValues},
+        column_writer::ColumnChunkWriter,
+        config::{CompressionType, TableStorageConfig},
+        stats::ColumnStats,
+    };
+    use tempfile::TempDir;
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        Runtime::new().unwrap().block_on(future)
+    }
+
+    fn temp_row_group_dir() -> (TempDir, std::path::PathBuf) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let row_group_dir = temp_dir.path().join("row_group_0");
+        std::fs::create_dir_all(&row_group_dir).unwrap();
+        (temp_dir, row_group_dir)
+    }
+
+    fn storage_config(
+        compression: CompressionType,
+        enable_dictionary_encoding: bool,
+        enable_bloom_filter: bool,
+    ) -> TableStorageConfig {
+        TableStorageConfig {
+            row_group_size: 1024,
+            compression,
+            enable_bloom_filter,
+            enable_dictionary_encoding,
+            compaction_segment_threshold: 8,
+            compaction_row_group_threshold: 8,
+            enable_background_compaction: false,
+            background_compaction_interval_seconds: 60,
+        }
+    }
+
+    fn empty_stats() -> ColumnStats {
+        ColumnStats::empty()
+    }
+
+    #[test]
+    fn reads_utf8_plain_round_trip_with_nulls() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let config = storage_config(CompressionType::Zstd, false, true);
+            let writer = ColumnChunkWriter::new(0, &config, ColumnType::Utf8);
+            let values = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+            let validity = [0b0000_0101];
+
+            let descriptor = writer
+                .write_column(&row_group_dir, ColumnValues::Utf8(&values), Some(&validity))
+                .await
+                .unwrap();
+
+            assert!(!descriptor.uses_dictionary_encoding);
+            assert!(descriptor.dictionary_file.is_none());
+            assert!(descriptor.validity_file.is_some());
+
+            let column = reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::Utf8)
+                .await
+                .unwrap();
+
+            match column.values {
+                ColumnValuesOwned::Utf8(decoded) => {
+                    assert_eq!(decoded, vec!["alpha", "", "gamma"]);
+                }
+                other => panic!("expected utf8 values, got {:?}", other),
+            }
+            assert_eq!(column.validity, Some(validity.to_vec()));
+        });
+    }
+
+    #[test]
+    fn reads_utf8_dictionary_round_trip_with_nulls() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let config = storage_config(CompressionType::Lz4, true, true);
+            let writer = ColumnChunkWriter::new(1, &config, ColumnType::Utf8);
+            let values = vec![
+                "us".to_string(),
+                "ca".to_string(),
+                "us".to_string(),
+                "mx".to_string(),
+            ];
+            let validity = [0b0000_1101];
+
+            let descriptor = writer
+                .write_utf8_column(&row_group_dir, &values, Some(&validity))
+                .await
+                .unwrap();
+
+            assert!(descriptor.uses_dictionary_encoding);
+            assert!(descriptor.dictionary_file.is_some());
+
+            let column = reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::Utf8)
+                .await
+                .unwrap();
+
+            match column.values {
+                ColumnValuesOwned::Utf8(decoded) => {
+                    assert_eq!(decoded, vec!["us", "", "us", "mx"]);
+                }
+                other => panic!("expected utf8 values, got {:?}", other),
+            }
+            assert_eq!(column.validity, Some(validity.to_vec()));
+        });
+    }
+
+    #[test]
+    fn reads_i32_round_trip_with_nulls() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let config = storage_config(CompressionType::None, false, true);
+            let writer = ColumnChunkWriter::new(2, &config, ColumnType::I32);
+            let values = vec![-5, 10, 15];
+            let validity = [0b0000_0101];
+
+            let descriptor = writer
+                .write_i32_column(&row_group_dir, &values, Some(&validity))
+                .await
+                .unwrap();
+
+            let column = reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::I32)
+                .await
+                .unwrap();
+
+            match column.values {
+                ColumnValuesOwned::I32(decoded) => assert_eq!(decoded, vec![-5, 0, 15]),
+                other => panic!("expected i32 values, got {:?}", other),
+            }
+            assert_eq!(column.validity, Some(validity.to_vec()));
+        });
+    }
+
+    #[test]
+    fn reads_u32_round_trip_with_nulls() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let config = storage_config(CompressionType::Lz4, false, true);
+            let writer = ColumnChunkWriter::new(3, &config, ColumnType::U32);
+            let values = vec![1u32, 2, 3, 4];
+            let validity = [0b0000_1011];
+
+            let descriptor = writer
+                .write_u32_column(&row_group_dir, &values, Some(&validity))
+                .await
+                .unwrap();
+
+            let column = reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::U32)
+                .await
+                .unwrap();
+
+            match column.values {
+                ColumnValuesOwned::U32(decoded) => assert_eq!(decoded, vec![1, 2, 0, 4]),
+                other => panic!("expected u32 values, got {:?}", other),
+            }
+            assert_eq!(column.validity, Some(validity.to_vec()));
+        });
+    }
+
+    #[test]
+    fn reads_bool_round_trip_with_nulls() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let config = storage_config(CompressionType::Zstd, false, false);
+            let writer = ColumnChunkWriter::new(4, &config, ColumnType::Bool);
+            let values = vec![true, true, false];
+            let validity = [0b0000_0101];
+
+            let descriptor = writer
+                .write_bool_column(&row_group_dir, &values, Some(&validity))
+                .await
+                .unwrap();
+
+            assert!(!descriptor.has_bloom_filter);
+
+            let column = reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::Bool)
+                .await
+                .unwrap();
+
+            match column.values {
+                ColumnValuesOwned::Bool(decoded) => assert_eq!(decoded, vec![true, false, false]),
+                other => panic!("expected bool values, got {:?}", other),
+            }
+            assert_eq!(column.validity, Some(validity.to_vec()));
+        });
+    }
+
+    #[test]
+    fn errors_when_dictionary_encoding_descriptor_is_missing_dictionary_file() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let encoded = postcard::to_allocvec(&vec![0u32, 1u32]).unwrap();
+            let data_path = row_group_dir.join("column_0.data");
+            fs::write(&data_path, &encoded).await.unwrap();
+
+            let descriptor = ColumnChunkDescriptor {
+                column_id: 0,
+                compression: CompressionType::None,
+                uses_dictionary_encoding: true,
+                has_bloom_filter: false,
+                dictionary_file: None,
+                data_file: "column_0.data".to_string(),
+                bloom_filter_file: None,
+                validity_file: None,
+                uncompressed_size: encoded.len() as u64,
+                compressed_size: encoded.len() as u64,
+                stats: empty_stats(),
+            };
+
+            match reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::Utf8)
+                .await
+                .unwrap_err()
+            {
+                AdolapError::StorageError(message) => {
+                    assert!(message.contains("no dictionary file found"));
+                }
+                other => panic!("expected storage error, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn errors_when_compressed_payload_cannot_be_decompressed() {
+        run_async_test(async {
+            let (_temp_dir, row_group_dir) = temp_row_group_dir();
+            let reader = ColumnChunkReader::new();
+            let data_path = row_group_dir.join("column_0.data");
+            fs::write(&data_path, b"not-zstd").await.unwrap();
+
+            let descriptor = ColumnChunkDescriptor {
+                column_id: 0,
+                compression: CompressionType::Zstd,
+                uses_dictionary_encoding: false,
+                has_bloom_filter: false,
+                dictionary_file: None,
+                data_file: "column_0.data".to_string(),
+                bloom_filter_file: None,
+                validity_file: None,
+                uncompressed_size: 8,
+                compressed_size: 8,
+                stats: empty_stats(),
+            };
+
+            match reader
+                .read_column_chunk(&row_group_dir, &descriptor, ColumnType::U32)
+                .await
+                .unwrap_err()
+            {
+                AdolapError::StorageError(message) => {
+                    assert!(message.contains("Decompression failed"));
+                }
+                other => panic!("expected storage error, got {:?}", other),
+            }
+        });
+    }
+}

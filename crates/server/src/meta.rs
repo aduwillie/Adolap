@@ -9,11 +9,13 @@ use exec::optimizer;
 use exec::parser::{Statement, parse_statement};
 use exec::planner;
 use protocol::{MetaResult, ServerMessage};
+use std::collections::BTreeMap;
 use std::cmp::Ordering;
 use std::fmt::Write as _;
 use std::path::Path;
-use storage::catalog::{Catalog, TableMetadata};
+use storage::catalog::{Catalog, DatabaseMetadata, TableMetadata};
 use storage::column::ColumnValue;
+use storage::compaction::{SegmentCompactionReport, SegmentCompactor, VacuumReport};
 use storage::metadata::SegmentMetadata;
 use storage::metadata_io::read_segment_metadata;
 use storage::schema::ColumnType;
@@ -30,8 +32,8 @@ pub async fn handle_meta_command(catalog: &Catalog, command: &str) -> Result<Ser
     debug!(verb = %verb, arg_count = args.len(), "executing server meta command");
 
     match verb.as_str() {
-        "databases" => meta_message("Databases", format_databases(&catalog.list_databases().await?)),
-        "tables" => meta_message("Tables", format_tables(&catalog.list_tables().await?, args.first().copied())),
+        "databases" => meta_message("Databases", format_databases(&catalog.list_databases().await?, &catalog.list_tables().await?).await?),
+        "tables" => meta_message("Tables", format_tables(&catalog.list_tables().await?, args.first().copied()).await?),
         "schema" => {
             let table_ref = required_table_arg(&args, "schema")?;
             meta_message("Schema", format_schema(&catalog.resolve_table(table_ref).await?))
@@ -51,6 +53,20 @@ pub async fn handle_meta_command(catalog: &Catalog, command: &str) -> Result<Ser
             let table = catalog.resolve_table(table_ref).await?;
             let segments = read_all_segment_metadata(&table.path).await?;
             meta_message("Table Stats", format_stats(&table, &segments)?)
+        }
+        "optimize" => {
+            let table_ref = required_table_arg(&args, "optimize")?;
+            let table = catalog.resolve_table(table_ref).await?;
+            let writer = catalog.open_table_writer(table_ref).await?;
+            let report = SegmentCompactor::new(&writer).optimize().await?;
+            meta_message("Optimize", format_optimize(&table, &report))
+        }
+        "vacuum" => {
+            let table_ref = required_table_arg(&args, "vacuum")?;
+            let table = catalog.resolve_table(table_ref).await?;
+            let writer = catalog.open_table_writer(table_ref).await?;
+            let report = SegmentCompactor::new(&writer).vacuum().await?;
+            meta_message("Vacuum", format_vacuum(&table, &report))
         }
         "explain" => {
             let query = trimmed[verb.len()..].trim();
@@ -74,37 +90,73 @@ fn required_table_arg<'a>(args: &'a [&str], command: &str) -> Result<&'a str, Ad
         .ok_or_else(|| AdolapError::ExecutionError(format!("{} requires a table reference", command)))
 }
 
-fn format_databases(databases: &[storage::catalog::DatabaseMetadata]) -> String {
+async fn format_databases(
+    databases: &[DatabaseMetadata],
+    tables: &[TableMetadata],
+) -> Result<String, AdolapError> {
     if databases.is_empty() {
-        return "No databases found".to_string();
+        return Ok("No databases found".to_string());
     }
 
-    databases
-        .iter()
-        .map(|database| database.name.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+    let mut table_rows = BTreeMap::new();
+    for table in tables {
+        let rows = table_row_count(table).await?;
+        table_rows.insert(table.fqn(), rows);
+    }
 
-fn format_tables(tables: &[TableMetadata], database: Option<&str>) -> String {
-    let filtered = tables
+    let rows = databases
         .iter()
-        .filter(|table| database.map(|database| table.database == database).unwrap_or(true))
-        .map(|table| {
-            format!(
-                "{}\tcolumns={}\tpath={}",
-                table.fqn(),
-                table.schema.columns.len(),
-                table.path.display()
-            )
+        .map(|database| {
+            let database_tables = tables
+                .iter()
+                .filter(|table| table.database == database.name)
+                .collect::<Vec<_>>();
+            let total_rows = database_tables
+                .iter()
+                .map(|table| table_rows.get(&table.fqn()).copied().unwrap_or(0))
+                .sum::<u64>();
+
+            vec![
+                database.name.clone(),
+                database_tables.len().to_string(),
+                total_rows.to_string(),
+                yes_no(total_rows > 0),
+            ]
         })
         .collect::<Vec<_>>();
 
+    Ok(render_text_table(
+        &["database", "tables", "rows", "has_data"],
+        &rows,
+    ))
+}
+
+async fn format_tables(tables: &[TableMetadata], database: Option<&str>) -> Result<String, AdolapError> {
+    let filtered = tables
+        .iter()
+        .filter(|table| database.map(|database| table.database == database).unwrap_or(true))
+        .collect::<Vec<_>>();
+
     if filtered.is_empty() {
-        "No tables found".to_string()
-    } else {
-        filtered.join("\n")
+        return Ok("No tables found".to_string());
     }
+
+    let mut rows = Vec::with_capacity(filtered.len());
+    for table in filtered {
+        let row_count = table_row_count(table).await?;
+        rows.push(vec![
+            table.database.clone(),
+            table.name.clone(),
+            table.schema.columns.len().to_string(),
+            row_count.to_string(),
+            yes_no(row_count > 0),
+        ]);
+    }
+
+    Ok(render_text_table(
+        &["database", "table", "columns", "rows", "has_data"],
+        &rows,
+    ))
 }
 
 fn format_schema(table: &TableMetadata) -> String {
@@ -126,13 +178,47 @@ fn format_schema(table: &TableMetadata) -> String {
 
 fn format_storage(table: &TableMetadata) -> String {
     format!(
-        "table: {}\ncompression: {:?}\nrow_group_size: {}\ndictionary_encoding: {}\nbloom_filter: {}",
+        "table: {}\ncompression: {:?}\nrow_group_size: {}\ndictionary_encoding: {}\nbloom_filter: {}\ncompaction_segment_threshold: {}\ncompaction_row_group_threshold: {}\nbackground_compaction: {}\nbackground_compaction_interval_seconds: {}",
         table.fqn(),
         table.storage_config.compression,
         table.storage_config.row_group_size,
         table.storage_config.enable_dictionary_encoding,
         table.storage_config.enable_bloom_filter,
+        table.storage_config.compaction_segment_threshold,
+        table.storage_config.compaction_row_group_threshold,
+        table.storage_config.enable_background_compaction,
+        table.storage_config.background_compaction_interval_seconds,
     )
+}
+
+fn format_optimize(table: &TableMetadata, report: &SegmentCompactionReport) -> String {
+    format!(
+        "table: {}\ninput_segments: {}\noutput_segments: {}\ninput_row_groups: {}\noutput_row_groups: {}\nrows_rewritten: {}\nsize_bytes_before: {}\nsize_bytes_after: {}\nskipped: {}",
+        table.fqn(),
+        report.input_segments,
+        report.output_segments,
+        report.input_row_groups,
+        report.output_row_groups,
+        report.rows_rewritten,
+        report.bytes_before,
+        report.bytes_after,
+        report.skipped,
+    )
+}
+
+fn format_vacuum(table: &TableMetadata, report: &VacuumReport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(&mut output, "table: {}", table.fqn());
+    let _ = writeln!(&mut output, "removed_entries: {}", report.removed_entries);
+    if report.removed_paths.is_empty() {
+        let _ = writeln!(&mut output, "removed_paths: none");
+    } else {
+        let _ = writeln!(&mut output, "removed_paths:");
+        for path in &report.removed_paths {
+            let _ = writeln!(&mut output, "  - {}", path);
+        }
+    }
+    output.trim_end().to_string()
 }
 
 fn format_segments(table: &TableMetadata, segments: &[SegmentMetadata]) -> String {
@@ -302,6 +388,82 @@ async fn read_all_segment_metadata(table_path: &Path) -> Result<Vec<SegmentMetad
     Ok(segments)
 }
 
+async fn table_row_count(table: &TableMetadata) -> Result<u64, AdolapError> {
+    Ok(read_all_segment_metadata(&table.path)
+        .await?
+        .into_iter()
+        .map(|segment| segment.total_rows as u64)
+        .sum())
+}
+
+fn yes_no(value: bool) -> String {
+    if value {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    }
+}
+
+fn render_text_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let widths = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            let row_width = rows
+                .iter()
+                .filter_map(|row| row.get(index))
+                .map(|value| value.len())
+                .max()
+                .unwrap_or(0);
+            header.len().max(row_width)
+        })
+        .collect::<Vec<_>>();
+
+    let top = render_table_border(&widths, "+", "+", "+", "-");
+    let middle = render_table_border(&widths, "+", "+", "+", "-");
+    let header = render_table_row(
+        &headers.iter().map(|header| header.to_string()).collect::<Vec<_>>(),
+        &widths,
+    );
+
+    let mut lines = vec![top.clone(), header, middle];
+    for row in rows {
+        lines.push(render_table_row(row, &widths));
+    }
+    lines.push(top);
+    lines.push(format!("({} {})", rows.len(), if rows.len() == 1 { "row" } else { "rows" }));
+    lines.join("\n")
+}
+
+fn render_table_border(
+    widths: &[usize],
+    left: &str,
+    middle: &str,
+    right: &str,
+    horizontal: &str,
+) -> String {
+    let mut border = String::new();
+    border.push_str(left);
+    for (index, width) in widths.iter().enumerate() {
+        border.push_str(&horizontal.repeat(*width + 2));
+        border.push_str(if index + 1 == widths.len() { right } else { middle });
+    }
+    border
+}
+
+fn render_table_row(values: &[String], widths: &[usize]) -> String {
+    let mut row = String::from("|");
+    for (index, width) in widths.iter().enumerate() {
+        let value = values.get(index).map(String::as_str).unwrap_or("");
+        let padding = width.saturating_sub(value.len());
+        row.push(' ');
+        row.push_str(value);
+        row.push_str(&" ".repeat(padding + 1));
+        row.push('|');
+    }
+    row
+}
+
 async fn explain_query(catalog: &Catalog, query: &str) -> Result<String, AdolapError> {
     let plan = match parse_statement(query)? {
         Statement::Query(plan) => plan,
@@ -328,4 +490,25 @@ async fn explain_query(catalog: &Catalog, query: &str) -> Result<String, AdolapE
         physical,
         memory,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_text_table;
+
+    #[test]
+    fn renders_text_table_with_headers_and_rows() {
+        let table = render_text_table(
+            &["database", "rows", "has_data"],
+            &[
+                vec!["default".into(), "0".into(), "no".into()],
+                vec!["sales".into(), "12".into(), "yes".into()],
+            ],
+        );
+
+        assert!(table.contains("| database | rows | has_data |"));
+        assert!(table.contains("| default  | 0    | no       |"));
+        assert!(table.contains("| sales    | 12   | yes      |"));
+        assert!(table.contains("(2 rows)"));
+    }
 }

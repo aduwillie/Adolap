@@ -1,5 +1,9 @@
 use thiserror::Error;
 
+// AdolapError is the main error type for the Adolap project.
+
+// It encompasses various error categories, including I/O errors, storage errors, execution errors, protocol errors, server errors, CLI errors, serialization errors, and unknown errors. 
+// Each variant provides a descriptive error message to facilitate debugging and error handling throughout the project.
 #[derive(Debug, Error)]
 pub enum AdolapError {
   #[error("Core error: {0}")]

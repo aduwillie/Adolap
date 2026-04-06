@@ -1,0 +1,285 @@
+{
+  "table_id": {
+    "value": 11460886743604014551
+  },
+  "total_rows": 4,
+  "total_size_bytes": 182,
+  "row_groups": [
+    {
+      "row_count": 2,
+      "columns": [
+        {
+          "column_id": 0,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": false,
+          "has_bloom_filter": true,
+          "dictionary_file": null,
+          "data_file": "column_0.data",
+          "bloom_filter_file": "column_0.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              1
+            ],
+            "max": [
+              2
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 1,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": true,
+          "has_bloom_filter": true,
+          "dictionary_file": "column_1.dict",
+          "data_file": "column_1.data",
+          "bloom_filter_file": "column_1.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              2,
+              85,
+              83
+            ],
+            "max": [
+              2,
+              85,
+              83
+            ],
+            "null_count": 0,
+            "distinct_count": 1
+          }
+        },
+        {
+          "column_id": 2,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": true,
+          "has_bloom_filter": true,
+          "dictionary_file": "column_2.dict",
+          "data_file": "column_2.data",
+          "bloom_filter_file": "column_2.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              7,
+              100,
+              101,
+              115,
+              107,
+              116,
+              111,
+              112
+            ],
+            "max": [
+              6,
+              109,
+              111,
+              98,
+              105,
+              108,
+              101
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 3,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": false,
+          "has_bloom_filter": true,
+          "dictionary_file": null,
+          "data_file": "column_3.data",
+          "bloom_filter_file": "column_3.bloom",
+          "validity_file": null,
+          "uncompressed_size": 5,
+          "compressed_size": 20,
+          "stats": {
+            "min": [
+              150,
+              1
+            ],
+            "max": [
+              240,
+              1
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 4,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": false,
+          "has_bloom_filter": false,
+          "dictionary_file": null,
+          "data_file": "column_4.data",
+          "bloom_filter_file": null,
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              1
+            ],
+            "max": [
+              1
+            ],
+            "null_count": 0,
+            "distinct_count": 1
+          }
+        }
+      ],
+      "total_uncompressed_size_bytes": 17,
+      "total_compressed_size_bytes": 92
+    },
+    {
+      "row_count": 2,
+      "columns": [
+        {
+          "column_id": 0,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": false,
+          "has_bloom_filter": true,
+          "dictionary_file": null,
+          "data_file": "column_0.data",
+          "bloom_filter_file": "column_0.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              3
+            ],
+            "max": [
+              4
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 1,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": true,
+          "has_bloom_filter": true,
+          "dictionary_file": "column_1.dict",
+          "data_file": "column_1.data",
+          "bloom_filter_file": "column_1.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              2,
+              68,
+              69
+            ],
+            "max": [
+              2,
+              70,
+              82
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 2,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": true,
+          "has_bloom_filter": true,
+          "dictionary_file": "column_2.dict",
+          "data_file": "column_2.data",
+          "bloom_filter_file": "column_2.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              6,
+              109,
+              111,
+              98,
+              105,
+              108,
+              101
+            ],
+            "max": [
+              6,
+              116,
+              97,
+              98,
+              108,
+              101,
+              116
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 3,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": false,
+          "has_bloom_filter": true,
+          "dictionary_file": null,
+          "data_file": "column_3.data",
+          "bloom_filter_file": "column_3.bloom",
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              0
+            ],
+            "max": [
+              70
+            ],
+            "null_count": 0,
+            "distinct_count": 2
+          }
+        },
+        {
+          "column_id": 4,
+          "compression": "Lz4",
+          "uses_dictionary_encoding": false,
+          "has_bloom_filter": false,
+          "dictionary_file": null,
+          "data_file": "column_4.data",
+          "bloom_filter_file": null,
+          "validity_file": null,
+          "uncompressed_size": 3,
+          "compressed_size": 18,
+          "stats": {
+            "min": [
+              0
+            ],
+            "max": [
+              0
+            ],
+            "null_count": 0,
+            "distinct_count": 1
+          }
+        }
+      ],
+      "total_uncompressed_size_bytes": 15,
+      "total_compressed_size_bytes": 90
+    }
+  ],
+  "storage_config": {
+    "row_group_size": 2,
+    "compression": "Lz4",
+    "enable_bloom_filter": true,
+    "enable_dictionary_encoding": true
+  },
+  "created_at": 1775435160867
+}

@@ -66,7 +66,7 @@ impl<'a> ColumnChunkWriter<'a> {
     ) -> Result<ColumnChunkDescriptor, AdolapError> {
         let validity_file = self.write_validity_bitmap(row_group_dir, validity).await?;
         let (final_buffer, dictionary_file, uses_dictionary, stats) = self.write_utf8(row_group_dir, values, validity).await?;
-        let bloom_filter_file = bloom::write_bloom_file(row_group_dir, self.column_index, values, validity).await?;
+        let bloom_filter_file = bloom::write_bloom_file(row_group_dir, &self.column_index, values, validity).await?;
 
         self.finalize_column_write(
             row_group_dir,
@@ -88,7 +88,7 @@ impl<'a> ColumnChunkWriter<'a> {
     ) -> Result<ColumnChunkDescriptor, AdolapError> {
         let validity_file = self.write_validity_bitmap(row_group_dir, validity).await?;
         let (final_buffer, dictionary_file, uses_dictionary, stats) = self.write_i32(values, validity)?;
-        let bloom_filter_file = bloom::write_bloom_file(row_group_dir, self.column_index, values, validity).await?;
+        let bloom_filter_file = bloom::write_bloom_file(row_group_dir, &self.column_index, values, validity).await?;
 
         self.finalize_column_write(
             row_group_dir,
@@ -110,7 +110,7 @@ impl<'a> ColumnChunkWriter<'a> {
     ) -> Result<ColumnChunkDescriptor, AdolapError> {
         let validity_file = self.write_validity_bitmap(row_group_dir, validity).await?;
         let (final_buffer, dictionary_file, uses_dictionary, stats) = self.write_u32(values, validity)?;
-        let bloom_filter_file = bloom::write_bloom_file(row_group_dir, self.column_index, values, validity).await?;
+        let bloom_filter_file = bloom::write_bloom_file(row_group_dir, &self.column_index, values, validity).await?;
 
         self.finalize_column_write(
             row_group_dir,
@@ -277,9 +277,9 @@ impl<'a> ColumnChunkWriter<'a> {
         }
 
         let file_name = match self.column_type {
-            ColumnType::Utf8 => bloom::write_bloom_file(row_group_dir, self.column_index, values.as_utf8()?, validity).await?,
-            ColumnType::I32 => bloom::write_bloom_file(row_group_dir, self.column_index, values.as_i32()?, validity).await?,
-            ColumnType::U32 => bloom::write_bloom_file(row_group_dir, self.column_index, values.as_u32()?, validity).await?,
+            ColumnType::Utf8 => bloom::write_bloom_file(row_group_dir, &self.column_index, values.as_utf8()?, validity).await?,
+            ColumnType::I32 => bloom::write_bloom_file(row_group_dir, &self.column_index, values.as_i32()?, validity).await?,
+            ColumnType::U32 => bloom::write_bloom_file(row_group_dir, &self.column_index, values.as_u32()?, validity).await?,
             ColumnType::Bool => None,
         };
 

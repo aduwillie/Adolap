@@ -391,6 +391,33 @@ fn parse_table_storage_config(input: &str) -> Result<TableStorageConfig, AdolapE
             "dictionary_encoding" | "enable_dictionary_encoding" => {
                 config.enable_dictionary_encoding = parse_bool_setting(raw_value)?;
             }
+            "compaction_segment_threshold" => {
+                config.compaction_segment_threshold = raw_value.parse::<usize>().map_err(|_| {
+                    AdolapError::ExecutionError(format!(
+                        "Invalid compaction_segment_threshold value: {}",
+                        raw_value
+                    ))
+                })?;
+            }
+            "compaction_row_group_threshold" => {
+                config.compaction_row_group_threshold = raw_value.parse::<usize>().map_err(|_| {
+                    AdolapError::ExecutionError(format!(
+                        "Invalid compaction_row_group_threshold value: {}",
+                        raw_value
+                    ))
+                })?;
+            }
+            "background_compaction" | "enable_background_compaction" => {
+                config.enable_background_compaction = parse_bool_setting(raw_value)?;
+            }
+            "background_compaction_interval_seconds" => {
+                config.background_compaction_interval_seconds = raw_value.parse::<u64>().map_err(|_| {
+                    AdolapError::ExecutionError(format!(
+                        "Invalid background_compaction_interval_seconds value: {}",
+                        raw_value
+                    ))
+                })?;
+            }
             other => {
                 return Err(AdolapError::ExecutionError(format!(
                     "Unsupported table config option: {}",

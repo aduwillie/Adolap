@@ -17,7 +17,7 @@ use storage::{
     table_writer::TableWriter,
 };
 use adolap_core::error::AdolapError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use exec::logical_plan::LogicalPlan;
 use exec::parser::{parse_statement, Statement};
@@ -29,7 +29,7 @@ use tracing::{debug, info};
 const DATA_ROOT: &str = "data";
 
 pub async fn handle_message(msg: ClientMessage) -> Result<ServerMessage, AdolapError> {
-    let catalog = Catalog::new(DATA_ROOT);
+    let catalog = Catalog::new(PathBuf::from(DATA_ROOT));
     match msg {
         ClientMessage::Ping => {
                 debug!("handling ping request");

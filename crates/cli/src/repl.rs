@@ -40,13 +40,16 @@ pub async fn run() -> Result<(), AdolapError> {
                 let trimmed = line.trim();
 
                 if query_buffer.is_empty() && trimmed.starts_with('\\') {
-                    match handle_meta_command(trimmed, &mut client, &mut settings).await? {
-                        MetaCommandResult::Continue(Some(response)) => print_response(response, &settings),
-                        MetaCommandResult::Continue(None) => {}
-                        MetaCommandResult::Exit => {
+                    match handle_meta_command(trimmed, &mut client, &mut settings).await {
+                        Ok(MetaCommandResult::Continue(Some(response))) => {
+                            print_response(response, &settings)
+                        }
+                        Ok(MetaCommandResult::Continue(None)) => {}
+                        Ok(MetaCommandResult::Exit) => {
                             println!("Exiting.");
                             break;
                         }
+                        Err(error) => eprintln!("Error: {}", error),
                     }
                     continue;
                 }

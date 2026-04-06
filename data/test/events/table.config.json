@@ -1,0 +1,6 @@
+{
+  "row_group_size": 2,
+  "compression": "Lz4",
+  "enable_bloom_filter": true,
+  "enable_dictionary_encoding": true
+}

@@ -135,6 +135,15 @@ pub async fn handle_meta_command(
             };
             Ok(MetaCommandResult::Continue(Some(client.send_meta_command(&remote).await?)))
         }
+        "optimize" | "vacuum" => {
+            let target = args.join(" ");
+            if target.is_empty() {
+                return Err(AdolapError::CliError(format!("\\{} requires a table reference", command)));
+            }
+            Ok(MetaCommandResult::Continue(Some(
+                client.send_meta_command(&format!("{} {}", command, target)).await?,
+            )))
+        }
         "explain" => {
             let query = body["explain".len()..].trim();
             if query.is_empty() {
@@ -212,6 +221,8 @@ fn help_text() -> String {
         "\\segments <db.table>             Show segment metadata for a table",
         "\\storage <db.table>              Show table storage configuration",
         "\\stats <db.table>                Show table and column stats",
+        "\\optimize <db.table>             Compact segments and row groups for a table",
+        "\\vacuum <db.table>               Remove stale compaction leftovers for a table",
         "\\explain <query>                 Build logical and physical plans without executing",
         "\\plan [on|off]                   Toggle planner log display for query results",
         "\\profile [on|off]                Toggle response-size and duration profiling footer",

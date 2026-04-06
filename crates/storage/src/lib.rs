@@ -20,6 +20,8 @@ pub mod row_group_reader;
 pub mod segment_writer;
 pub mod segment_reader;
 pub mod table_reader;
+pub mod compaction;
+pub mod background_compaction;
 
 pub mod bloom;
 pub mod compression;
