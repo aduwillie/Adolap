@@ -299,12 +299,18 @@ impl TableWriter {
                 .columns
                 .iter()
                 .map(|column| {
-                    object
-                        .get(&column.name)
-                        .cloned()
-                        .map(json_value_to_column_value)
-                        .transpose()
-                        .map(|value| value.flatten())
+                    match object.get(&column.name) {
+                        // Key present: convert the value (may still be JSON null).
+                        Some(v) => json_value_to_column_value(v.clone()),
+                        // Key absent: treat as null and let schema validation decide.
+                        // Emit a descriptive error early for non-nullable columns so
+                        // the user knows exactly which field is missing.
+                        None if !column.nullable => Err(AdolapError::StorageError(format!(
+                            "Missing required field '{}' in JSON row (column is NOT NULL)",
+                            column.name
+                        ))),
+                        None => Ok(None),
+                    }
                 })
                 .collect(),
             Value::Array(values) => {
@@ -733,4 +739,98 @@ mod tests {
             assert!(segments.is_empty(), "expected no segments after replacing with empty set");
         });
     }
-}
+
+    fn nullable_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "label".into(), column_type: ColumnType::Utf8, nullable: true },
+            ],
+        }
+    }
+
+    #[test]
+    fn ingest_json_array_rejects_missing_not_null_field() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(
+                temp_dir.path(),
+                "default",
+                "events",
+                &nullable_schema(),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+
+            // Object row missing the required "id" key.
+            let json = r#"[{"label": "hello"}]"#;
+            let json_file = temp_dir.path().join("data.json");
+            tokio::fs::write(&json_file, json).await.unwrap();
+
+            let err = writer.ingest_json_file(&json_file).await.unwrap_err();
+            match err {
+                AdolapError::StorageError(msg) => {
+                    assert!(msg.contains("id"), "expected error to name the missing field, got: {msg}");
+                    assert!(msg.contains("NOT NULL") || msg.contains("required"), "got: {msg}");
+                }
+                other => panic!("expected StorageError, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn ingest_json_array_allows_missing_nullable_field() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(
+                temp_dir.path(),
+                "default",
+                "events",
+                &nullable_schema(),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+
+            // Object row missing the nullable "label" key — should be treated as null.
+            let json = r#"[{"id": 1}]"#;
+            let json_file = temp_dir.path().join("data.json");
+            tokio::fs::write(&json_file, json).await.unwrap();
+
+            let inserted = writer.ingest_json_file(&json_file).await.unwrap();
+            assert_eq!(inserted, 1);
+        });
+    }
+
+    #[test]
+    fn ingest_ndjson_rejects_explicit_null_for_not_null_column() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(
+                temp_dir.path(),
+                "default",
+                "events",
+                &nullable_schema(),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+
+            // Explicit JSON null for a NOT NULL column should fail validation.
+            let ndjson = "{\"id\": null, \"label\": \"x\"}\n";
+            let json_file = temp_dir.path().join("data.ndjson");
+            tokio::fs::write(&json_file, ndjson).await.unwrap();
+
+            let err = writer.ingest_json_file(&json_file).await.unwrap_err();
+            match err {
+                AdolapError::StorageError(msg) => {
+                    assert!(
+                        msg.contains("id") || msg.contains("not nullable") || msg.contains("NOT NULL"),
+                        "expected error to mention the NOT NULL column, got: {msg}"
+                    );
+                }
+                other => panic!("expected StorageError, got {:?}", other),
+            }
+        });
+    }}
