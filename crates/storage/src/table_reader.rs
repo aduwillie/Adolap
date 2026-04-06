@@ -61,3 +61,58 @@ impl<'a> TableReader<'a> {
         Ok(dirs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TableReader;
+    use crate::{
+        column::ColumnValue,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+        table_writer::TableWriter,
+    };
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        Runtime::new().unwrap().block_on(future)
+    }
+
+    fn sample_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "name".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        }
+    }
+
+    #[test]
+    fn reads_table_batches_from_discovered_segments() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let schema = sample_schema();
+            let writer = TableWriter::create_table(temp_dir.path(), "default", "events", &schema, &Default::default())
+                .await
+                .unwrap();
+
+            writer
+                .insert_rows(&[
+                    vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("alpha".into()))],
+                    vec![Some(ColumnValue::U32(2)), Some(ColumnValue::Utf8("beta".into()))],
+                ])
+                .await
+                .unwrap();
+
+            let batches = TableReader::new(&writer.table_dir, &schema)
+                .read_table(None, Some(vec!["name".into()]))
+                .await
+                .unwrap();
+
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].schema.columns[0].name, "name");
+            assert_eq!(batches[0].row_count, 2);
+        });
+    }
+}

@@ -77,3 +77,86 @@ impl<'a> RowGroupWriter<'a> {
     Ok(metadata)
   }
 }
+
+  #[cfg(test)]
+  mod tests {
+    use super::RowGroupWriter;
+    use crate::{
+      column::{ColumnInput, ColumnValues},
+      config::{CompressionType, TableStorageConfig},
+      schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+    use core::error::AdolapError;
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+      F: std::future::Future<Output = T>,
+    {
+      Runtime::new().unwrap().block_on(future)
+    }
+
+    fn sample_schema() -> TableSchema {
+      TableSchema {
+        columns: vec![
+          ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+          ColumnSchema { name: "active".into(), column_type: ColumnType::Bool, nullable: false },
+        ],
+      }
+    }
+
+    #[test]
+    fn rejects_mismatched_column_count() {
+      run_async_test(async {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let schema = sample_schema();
+        let config = TableStorageConfig::default();
+        let ids = [1u32, 2u32];
+
+        match RowGroupWriter::new(&config)
+          .write_row_group(
+            temp_dir.path(),
+            &schema,
+            vec![ColumnInput { values: ColumnValues::U32(&ids), validity: None }],
+          )
+          .await
+          .unwrap_err()
+        {
+          AdolapError::StorageError(message) => assert!(message.contains("does not match schema")),
+          other => panic!("expected storage error, got {:?}", other),
+        }
+      });
+    }
+
+    #[test]
+    fn writes_metadata_for_valid_row_group() {
+      run_async_test(async {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let schema = sample_schema();
+        let config = TableStorageConfig {
+          compression: CompressionType::None,
+          enable_bloom_filter: false,
+          enable_dictionary_encoding: false,
+          ..TableStorageConfig::default()
+        };
+        let ids = [1u32, 2u32];
+        let flags = [true, false];
+
+        let metadata = RowGroupWriter::new(&config)
+          .write_row_group(
+            temp_dir.path(),
+            &schema,
+            vec![
+              ColumnInput { values: ColumnValues::U32(&ids), validity: None },
+              ColumnInput { values: ColumnValues::Bool(&flags), validity: None },
+            ],
+          )
+          .await
+          .unwrap();
+
+        assert_eq!(metadata.row_count, 2);
+        assert_eq!(metadata.columns.len(), 2);
+        assert!(temp_dir.path().join("row_group.meta").exists());
+      });
+    }
+  }

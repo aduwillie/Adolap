@@ -21,3 +21,22 @@ pub fn count_nulls(bits: &[u8], len: usize) -> usize {
     .filter(|&i| is_null(Some(bits), i))
     .count()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{count_nulls, is_null};
+
+    #[test]
+    fn interprets_validity_bitmaps_and_empty_inputs() {
+        let validity = [0b0000_1101];
+
+        assert!(!is_null(None, 0));
+        assert!(!is_null(Some(&[]), 3));
+        assert!(!is_null(Some(&validity), 0));
+        assert!(is_null(Some(&validity), 1));
+        assert!(!is_null(Some(&validity), 2));
+        assert!(!is_null(Some(&validity), 3));
+        assert!(!is_null(Some(&validity), 8));
+        assert_eq!(count_nulls(&validity, 4), 1);
+    }
+}

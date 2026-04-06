@@ -122,3 +122,37 @@ impl ColumnInputOwned {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ColumnInputOwned, ColumnValue, ColumnValues, ColumnValuesOwned};
+    use core::error::AdolapError;
+
+    #[test]
+    fn column_values_len_and_accessors_match_variant() {
+        let utf8 = vec!["a".to_string(), "b".to_string()];
+        let values = ColumnValues::Utf8(&utf8);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.as_utf8().unwrap(), utf8.as_slice());
+
+        match values.as_i32().unwrap_err() {
+            AdolapError::StorageError(message) => assert!(message.contains("not of type I32")),
+            other => panic!("expected storage error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn owned_column_values_borrow_without_losing_validity() {
+        let owned = ColumnInputOwned {
+            values: ColumnValuesOwned::I32(vec![1, 2, 3]),
+            validity: Some(vec![0b0000_0101]),
+        };
+
+        let borrowed = owned.as_borrowed();
+        assert_eq!(borrowed.validity, Some(&[0b0000_0101][..]));
+        assert_eq!(borrowed.values.as_i32().unwrap(), &[1, 2, 3]);
+
+        let scalar = ColumnValue::Bool(true);
+        assert!(matches!(scalar, ColumnValue::Bool(true)));
+    }
+}

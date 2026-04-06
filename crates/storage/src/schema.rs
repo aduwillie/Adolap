@@ -157,3 +157,58 @@ fn type_error(column_name: &str, expected: &str) -> AdolapError {
   ))
 }
 
+#[cfg(test)]
+mod tests {
+  use super::{ColumnSchema, ColumnType, TableSchema};
+  use crate::column::ColumnValue;
+  use core::error::AdolapError;
+  use tokio::runtime::Runtime;
+
+  fn run_async_test<F, T>(future: F) -> T
+  where
+    F: std::future::Future<Output = T>,
+  {
+    Runtime::new().unwrap().block_on(future)
+  }
+
+  fn sample_schema() -> TableSchema {
+    TableSchema {
+      columns: vec![
+        ColumnSchema { name: "id".into(), column_type: ColumnType::I32, nullable: false },
+        ColumnSchema { name: "active".into(), column_type: ColumnType::Bool, nullable: true },
+      ],
+    }
+  }
+
+  #[test]
+  fn validates_rows_and_type_coercions() {
+    let schema = sample_schema();
+    assert!(schema.validate_row(&[Some(ColumnValue::Utf8("12".into())), Some(ColumnValue::I32(1))]).is_ok());
+
+    match schema.validate_row(&[Some(ColumnValue::Utf8("x".into())), Some(ColumnValue::Bool(true))]).unwrap_err() {
+      AdolapError::StorageError(message) => assert!(message.contains("cannot be parsed as I32")),
+      other => panic!("expected storage error, got {:?}", other),
+    }
+
+    match schema.validate_row(&[Some(ColumnValue::I32(12)), None]).unwrap() {
+      () => {}
+    }
+  }
+
+  #[test]
+  fn saves_and_loads_schema() {
+    run_async_test(async {
+      let temp_dir = tempfile::tempdir().unwrap();
+      let path = temp_dir.path().join("schema.json");
+      let schema = sample_schema();
+
+      schema.save(&path).await.unwrap();
+      let loaded = TableSchema::load(&path).await.unwrap();
+
+      assert_eq!(loaded.columns.len(), 2);
+      assert_eq!(loaded.columns[0].name, "id");
+      assert!(matches!(loaded.columns[1].column_type, ColumnType::Bool));
+    });
+  }
+}
+

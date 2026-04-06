@@ -52,3 +52,32 @@ pub fn decompress_buffer(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{compress_buffer, decompress_buffer};
+    use crate::config::CompressionType;
+    use core::error::AdolapError;
+
+    #[test]
+    fn round_trips_supported_compression_types() {
+        let payload = b"alpha alpha alpha alpha alpha alpha alpha alpha";
+
+        for compression in [CompressionType::None, CompressionType::Lz4, CompressionType::Zstd] {
+            let compressed = compress_buffer(payload, compression).unwrap();
+            let decompressed = decompress_buffer(&compressed, compression).unwrap();
+            assert_eq!(decompressed, payload);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_compressed_payload() {
+        let error = decompress_buffer(b"not-a-frame", CompressionType::Lz4).unwrap_err();
+        match error {
+            AdolapError::StorageError(message) => {
+                assert!(message.contains("LZ4 decompression failed"));
+            }
+            other => panic!("expected storage error, got {:?}", other),
+        }
+    }
+}

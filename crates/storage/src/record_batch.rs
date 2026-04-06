@@ -65,6 +65,10 @@ impl RecordBatch {
       }
     }
 
+    for column in &mut columns {
+      clear_redundant_validity(column);
+    }
+
     Ok(Self {
       schema,
       columns,
@@ -143,8 +147,6 @@ fn push_value(
     return Err(AdolapError::StorageError(format!("Column {} is not nullable", schema.name)));
   }
 
-  clear_redundant_validity(column);
-
   Ok(())
 }
 
@@ -166,5 +168,35 @@ fn parse_bool(value: &str, column_name: &str) -> Result<bool, AdolapError> {
 fn clear_redundant_validity(column: &mut ColumnInputOwned) {
   if column.validity.as_ref().is_some_and(|bits| bits.iter().all(|byte| *byte == 0xFF)) {
     column.validity = None;
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::RecordBatch;
+  use crate::{column::ColumnValue, schema::{ColumnSchema, ColumnType, TableSchema}};
+
+  fn sample_schema() -> TableSchema {
+      TableSchema {
+          columns: vec![
+              ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+              ColumnSchema { name: "name".into(), column_type: ColumnType::Utf8, nullable: true },
+          ],
+      }
+  }
+
+  #[test]
+  fn round_trips_rows_and_column_lookup() {
+      let schema = sample_schema();
+      let rows = vec![
+          vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("alpha".into()))],
+          vec![Some(ColumnValue::U32(2)), None],
+      ];
+
+      let batch = RecordBatch::from_rows(schema.clone(), &rows).unwrap();
+      assert_eq!(batch.column_index("name"), Some(1));
+      assert_eq!(batch.column_index("missing"), None);
+      assert_eq!(batch.to_rows().unwrap(), rows);
+      assert_eq!(batch.schema.columns.len(), schema.columns.len());
   }
 }

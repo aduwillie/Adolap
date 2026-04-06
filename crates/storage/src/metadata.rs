@@ -27,3 +27,24 @@ impl SegmentMetadata {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SegmentMetadata;
+    use crate::config::TableStorageConfig;
+    use core::{id::TableId, time::now_ms};
+
+    #[test]
+    fn segment_metadata_new_starts_empty() {
+        let before = now_ms();
+        let metadata = SegmentMetadata::new(TableId { value: 7 }, TableStorageConfig::default());
+        let after = now_ms();
+
+        assert_eq!(metadata.table_id.value, 7);
+        assert_eq!(metadata.total_rows, 0);
+        assert_eq!(metadata.total_size_bytes, 0);
+        assert!(metadata.row_groups.is_empty());
+        assert!(metadata.created_at >= before);
+        assert!(metadata.created_at <= after);
+    }
+}

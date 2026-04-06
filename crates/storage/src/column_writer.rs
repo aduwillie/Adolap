@@ -319,3 +319,50 @@ impl<'a> ColumnChunkWriter<'a> {
         Ok((final_buffer, None, false, stats))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ColumnChunkWriter;
+    use crate::{config::{CompressionType, TableStorageConfig}, schema::ColumnType};
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        Runtime::new().unwrap().block_on(future)
+    }
+
+    #[test]
+    fn constructor_preserves_column_configuration() {
+        let config = TableStorageConfig::default();
+        let writer = ColumnChunkWriter::new(3, &config, ColumnType::Bool);
+
+        assert_eq!(writer.column_index, 3);
+        assert!(matches!(writer.column_type, ColumnType::Bool));
+        assert_eq!(writer.storage_config.row_group_size, config.row_group_size);
+    }
+
+    #[test]
+    fn writes_utf8_column_with_dictionary_and_validity_files() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let config = TableStorageConfig {
+                compression: CompressionType::None,
+                enable_bloom_filter: false,
+                enable_dictionary_encoding: true,
+                ..TableStorageConfig::default()
+            };
+            let writer = ColumnChunkWriter::new(0, &config, ColumnType::Utf8);
+            let values = vec!["us".to_string(), "ca".to_string(), "us".to_string()];
+            let validity = [0b0000_0101];
+
+            let descriptor = writer.write_utf8_column(temp_dir.path(), &values, Some(&validity)).await.unwrap();
+
+            assert!(descriptor.uses_dictionary_encoding);
+            assert!(descriptor.dictionary_file.is_some());
+            assert!(descriptor.validity_file.is_some());
+            assert!(temp_dir.path().join(descriptor.data_file).exists());
+        });
+    }
+}

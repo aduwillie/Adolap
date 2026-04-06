@@ -500,3 +500,50 @@ fn type_error(schema: &crate::schema::ColumnSchema, expected: &str) -> AdolapErr
         schema.name, expected
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_name, TableWriter};
+    use crate::{column::ColumnValue, schema::{ColumnSchema, ColumnType, TableSchema}};
+    use core::error::AdolapError;
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        Runtime::new().unwrap().block_on(future)
+    }
+
+    fn sample_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false }],
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_invalid_identifiers() {
+        assert!(validate_name("good_name", "table").is_ok());
+        match validate_name("bad-name", "table").unwrap_err() {
+            AdolapError::StorageError(message) => assert!(message.contains("Invalid table name")),
+            other => panic!("expected storage error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn insert_rows_returns_zero_for_empty_input() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(temp_dir.path(), "default", "events", &sample_schema(), &Default::default())
+                .await
+                .unwrap();
+
+            let inserted = writer.insert_rows(&[]).await.unwrap();
+            assert_eq!(inserted, 0);
+            assert!(!writer.table_dir.join("segment_0").exists());
+
+            writer.insert_rows(&[vec![Some(ColumnValue::U32(1))]]).await.unwrap();
+            assert!(writer.table_dir.join("segment_0").exists());
+        });
+    }
+}

@@ -28,3 +28,24 @@ pub const ROW_GROUP_METADATA_FILE_NAME: &str = "row_group.meta";
 
 /// Name of the per-table storage configuration file.
 pub const TABLE_CONFIG_FILE_NAME: &str = "table.config.json";
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        column_chunk_file_name, row_group_dir_name, segment_dir_name, ROW_GROUP_METADATA_FILE_NAME,
+        SEGMENT_META_JSON_FILE_NAME, SEGMENT_METADATA_FILE_NAME, TABLE_CONFIG_FILE_NAME,
+    };
+
+    #[test]
+    fn formats_storage_names_consistently() {
+        assert_eq!(segment_dir_name(0), "segment_0");
+        assert_eq!(segment_dir_name(42), "segment_42");
+        assert_eq!(row_group_dir_name(0), "row_group_000");
+        assert_eq!(row_group_dir_name(12), "row_group_012");
+        assert_eq!(column_chunk_file_name(7), "col_7.data");
+        assert_eq!(SEGMENT_METADATA_FILE_NAME, "segment.meta");
+        assert_eq!(SEGMENT_META_JSON_FILE_NAME, "segment.meta.json");
+        assert_eq!(ROW_GROUP_METADATA_FILE_NAME, "row_group.meta");
+        assert_eq!(TABLE_CONFIG_FILE_NAME, "table.config.json");
+    }
+}

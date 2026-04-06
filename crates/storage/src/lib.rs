@@ -32,3 +32,15 @@ pub mod null;
 pub mod schema;
 pub mod record_batch;
 pub mod table_writer;
+
+#[cfg(test)]
+mod tests {
+	use crate::{config::TableStorageConfig, naming::segment_dir_name};
+
+	#[test]
+	fn storage_crate_exports_core_modules() {
+		let config = TableStorageConfig::default();
+		assert!(config.enable_bloom_filter);
+		assert_eq!(segment_dir_name(3), "segment_3");
+	}
+}

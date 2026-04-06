@@ -58,3 +58,69 @@ impl<'a> RowGroupReader<'a> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RowGroupReader;
+    use crate::{
+        column::{ColumnInput, ColumnValue, ColumnValues},
+        config::{CompressionType, TableStorageConfig},
+        row_group_writer::RowGroupWriter,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        Runtime::new().unwrap().block_on(future)
+    }
+
+    fn sample_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "name".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        }
+    }
+
+    #[test]
+    fn reads_row_group_with_projection() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let row_group_dir = temp_dir.path().join("row_group_000");
+            let schema = sample_schema();
+            let config = TableStorageConfig {
+                compression: CompressionType::None,
+                enable_bloom_filter: false,
+                enable_dictionary_encoding: false,
+                ..TableStorageConfig::default()
+            };
+            let ids = [1u32, 2u32];
+            let names = ["a".to_string(), "b".to_string()];
+
+            RowGroupWriter::new(&config)
+                .write_row_group(
+                    &row_group_dir,
+                    &schema,
+                    vec![
+                        ColumnInput { values: ColumnValues::U32(&ids), validity: None },
+                        ColumnInput { values: ColumnValues::Utf8(&names), validity: None },
+                    ],
+                )
+                .await
+                .unwrap();
+
+            let batch = RowGroupReader::new(&schema, Some(vec![1]))
+                .read_row_group(&row_group_dir)
+                .await
+                .unwrap();
+
+            assert_eq!(batch.schema.columns.len(), 1);
+            assert_eq!(batch.schema.columns[0].name, "name");
+            assert_eq!(batch.to_rows().unwrap(), vec![vec![Some(ColumnValue::Utf8("a".into()))], vec![Some(ColumnValue::Utf8("b".into()))]]);
+        });
+    }
+}

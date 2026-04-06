@@ -63,3 +63,51 @@ impl<'a> SegmentWriter<'a> {
       Ok(segment_metadata)
     }
 }
+
+    #[cfg(test)]
+    mod tests {
+      use super::SegmentWriter;
+      use crate::{
+        column::{ColumnInput, ColumnValues},
+        config::{CompressionType, TableStorageConfig},
+        schema::{ColumnSchema, ColumnType, TableSchema},
+      };
+      use core::id::TableId;
+      use tokio::runtime::Runtime;
+
+      fn run_async_test<F, T>(future: F) -> T
+      where
+        F: std::future::Future<Output = T>,
+      {
+        Runtime::new().unwrap().block_on(future)
+      }
+
+      fn sample_schema() -> TableSchema {
+        TableSchema {
+          columns: vec![ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false }],
+        }
+      }
+
+      #[test]
+      fn writes_segment_metadata_and_json() {
+        run_async_test(async {
+          let temp_dir = tempfile::tempdir().unwrap();
+          let schema = sample_schema();
+          let config = TableStorageConfig { compression: CompressionType::None, ..TableStorageConfig::default() };
+          let ids = [1u32, 2u32];
+
+          let metadata = SegmentWriter::new(TableId { value: 8 }, &config, &schema)
+            .write_segment(
+              temp_dir.path(),
+              vec![vec![ColumnInput { values: ColumnValues::U32(&ids), validity: None }]],
+            )
+            .await
+            .unwrap();
+
+          assert_eq!(metadata.total_rows, 2);
+          assert_eq!(metadata.row_groups.len(), 1);
+          assert!(temp_dir.path().join("segment.meta").exists());
+          assert!(temp_dir.path().join("segment.meta.json").exists());
+        });
+      }
+    }

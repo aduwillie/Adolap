@@ -275,3 +275,65 @@ where
         .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize max stats value: {}", e)))?;
     Ok(value <= &max_value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Predicate, SegmentReader};
+    use crate::{
+        column::{ColumnInputOwned, ColumnValue},
+        config::{CompressionType, TableStorageConfig},
+        naming::segment_dir_name,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+        segment_writer::SegmentWriter,
+    };
+    use core::id::TableId;
+    use tokio::runtime::Runtime;
+
+    fn run_async_test<F, T>(future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        Runtime::new().unwrap().block_on(future)
+    }
+
+    fn sample_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "name".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        }
+    }
+
+    #[test]
+    fn reads_segment_with_projection_and_predicate() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let schema = sample_schema();
+            let rows = vec![
+                vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("alpha".into()))],
+                vec![Some(ColumnValue::U32(2)), Some(ColumnValue::Utf8("beta".into()))],
+            ];
+            let batch = RecordBatch::from_rows(schema.clone(), &rows).unwrap();
+            let borrowed = vec![batch.columns.iter().map(ColumnInputOwned::as_borrowed).collect()];
+            let config = TableStorageConfig { compression: CompressionType::None, ..TableStorageConfig::default() };
+            let segment_dir = temp_dir.path().join(segment_dir_name(0));
+
+            SegmentWriter::new(TableId { value: 1 }, &config, &schema)
+                .write_segment(&segment_dir, borrowed)
+                .await
+                .unwrap();
+
+            let batches = SegmentReader::new(&schema, Some(vec!["name".into()]))
+                .read_segment(&segment_dir, Some(&Predicate::Equals("id".into(), ColumnValue::U32(2))))
+                .await
+                .unwrap();
+
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].schema.columns.len(), 1);
+            assert_eq!(batches[0].schema.columns[0].name, "name");
+            assert_eq!(batches[0].to_rows().unwrap(), vec![vec![Some(ColumnValue::Utf8("alpha".into()))], vec![Some(ColumnValue::Utf8("beta".into()))]]);
+        });
+    }
+}
