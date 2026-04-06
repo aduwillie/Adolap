@@ -10,25 +10,13 @@ It covers three things for each major area:
 2. The design decisions the project makes.
 3. The concrete implementation in this repository.
 
-Adolap's storage layer is intentionally compact, but it is not trivial. It already includes a real catalog, immutable segments, row-group chunking, per-column metadata, compression, dictionary encoding for strings, bloom filters, null bitmaps, and metadata-driven pruning.
+Adolap's storage layer is intentionally compact but not trivial. It includes a real catalog, immutable segments, row-group chunking, per-column metadata, compression, dictionary encoding for strings, bloom filters, null bitmaps, metadata-driven pruning, and background compaction.
 
-For a focused walkthrough of the Bloom filter implementation, including the bit math, sizing intuition, and the bit packing technique used by the persisted representation, see [Chapter 7: Bloom Filters](07_bloom_filters.md).
+For a focused walkthrough of the Bloom filter implementation, see [Chapter 7: Bloom Filters](07_bloom_filters.md).
 
-## The storage problem Adolap is solving
+---
 
-Any database storage layer needs to answer the same basic questions:
-
-- Where does a logical table live physically?
-- How is schema persisted?
-- How are rows written and later found again?
-- What metadata is cheap to read before touching the full data?
-- How much of the data can be skipped for a selective query?
-
-Adolap answers those questions with a file-backed, segment-oriented, row-grouped columnar design.
-
-That design is a good fit for this repo because it keeps the data model inspectable on disk while still demonstrating real analytical database techniques.
-
-## Core storage model
+## 1. Storage hierarchy
 
 At the highest level, storage is organized like this:
 
@@ -54,108 +42,52 @@ data/<table>
 
 That fallback is not just mentioned in docs. `Catalog` actively resolves both layouts, treating the legacy form as the implicit `default` database when `schema.json` exists at the table root.
 
-### Why this hierarchy exists
-
-Theory:
+### 1.1 Why this hierarchy exists
 
 - A database groups tables under a namespace.
-- A segment gives the system an immutable write unit.
-- A row group gives the system a practical pruning and scan unit.
+- A segment is an immutable write unit.
+- A row group is the smallest pruning and scan unit.
 - A column chunk keeps values of one column physically together for better analytical reads.
 
-Decision in Adolap:
+### 1.2 Key source files
 
-- Keep the hierarchy explicit on disk instead of hiding it behind a binary super-file.
-- Prefer immutable new-segment writes over in-place mutation.
-- Make row groups the smallest practical read/prune unit.
+| Responsibility | File |
+|---|---|
+| Name resolution and table lifecycle | `crates/storage/src/catalog.rs` |
+| Write orchestration | `crates/storage/src/table_writer.rs` |
+| Segment writing | `crates/storage/src/segment_writer.rs` |
+| Row group writing | `crates/storage/src/row_group_writer.rs` |
+| Column chunk writing | `crates/storage/src/column_writer.rs` |
+| Compaction | `crates/storage/src/compaction.rs` |
+| Background compaction scheduling | `crates/storage/src/background_compaction.rs` |
+| Naming helpers | `crates/storage/src/naming.rs` |
+| Null bitmap helpers | `crates/storage/src/null.rs` |
+| Column statistics | `crates/storage/src/stats.rs` |
+| Storage configuration | `crates/storage/src/config.rs` |
+| Segment metadata I/O | `crates/storage/src/metadata_io.rs` |
 
-Implementation in this repo:
+---
 
-- `crates/storage/src/catalog.rs` resolves database and table directories.
-- `crates/storage/src/table_writer.rs` allocates new segments.
-- `crates/storage/src/segment_writer.rs` writes a full segment.
-- `crates/storage/src/row_group_writer.rs` writes each row group.
-- `crates/storage/src/column_writer.rs` writes per-column chunk files and metadata.
+## 2. Table storage configuration
 
-## Catalog theory, decisions, and implementation
+`TableStorageConfig` in `crates/storage/src/config.rs` controls every physical storage decision for a table. It is persisted at table creation time as `table.config.json` alongside `schema.json`.
 
-### Theory
-
-A catalog is the component that maps logical names such as `analytics.events` to physical metadata. In larger systems the catalog may be transactional and service-backed. In Adolap it is filesystem-backed.
-
-### Decision
-
-Adolap keeps the catalog simple and local:
-
-- the filesystem is the metadata authority
-- schema and storage config live alongside table data
-- server and planner code should go through the catalog instead of constructing table paths manually
-
-This is the right choice for this codebase because it keeps table resolution observable and avoids smuggling path logic into higher layers.
-
-### Implementation in this repo
-
-`Catalog` in `crates/storage/src/catalog.rs` is the storage entry point for name resolution and table lifecycle.
-
-Key responsibilities:
-
-- list databases
-- list tables
-- resolve `database.table`
-- support implicit `default.table`
-- create and drop databases and tables
-- open a `TableWriter` for an existing table
-- preserve compatibility with the legacy `data/<table>` layout
-
-Important public methods:
+### 2.1 All fields, types, and defaults
 
 ```rust
-pub async fn resolve_table(&self, table_ref: &str) -> Result<TableMetadata, AdolapError>
-pub async fn create_table(&self, table_ref: &str, schema: &TableSchema, storage_config: &TableStorageConfig) -> Result<TableMetadata, AdolapError>
-pub async fn open_table_writer(&self, table_ref: &str) -> Result<TableWriter, AdolapError>
-pub async fn drop_table(&self, table_ref: &str) -> Result<TableMetadata, AdolapError>
-pub async fn drop_database(&self, database: &str) -> Result<usize, AdolapError>
-```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TableStorageConfig {
+    pub row_group_size: usize,
+    pub compression: CompressionType,
+    pub enable_bloom_filter: bool,
+    pub enable_dictionary_encoding: bool,
+    pub compaction_segment_threshold: usize,
+    pub compaction_row_group_threshold: usize,
+    pub enable_background_compaction: bool,
+    pub background_compaction_interval_seconds: u64,
+}
 
-The repo note about catalog usage matters here: planner and server code should resolve tables through `Catalog`, not by hand-building `data/<db>/<table>` paths.
-
-## Table metadata persistence
-
-Each table directory persists at least two pieces of durable metadata:
-
-- `schema.json`
-- `table.config.json`
-
-### Theory
-
-Schemas and storage settings need to survive process restarts and must be discoverable before any segment is opened.
-
-### Decision
-
-Adolap persists schema and table storage configuration at table creation time and keeps them as human-readable JSON files.
-
-That is a strong choice for a learning project because it keeps the physical contract legible without extra tooling.
-
-### Implementation in this repo
-
-`TableWriter::create_table` does the following:
-
-1. creates the database directory if necessary
-2. creates the table directory
-3. writes `schema.json`
-4. writes `table.config.json`
-5. returns a ready-to-use `TableWriter`
-
-The current storage configuration fields are:
-
-- `row_group_size`
-- `compression`
-- `enable_bloom_filter`
-- `enable_dictionary_encoding`
-
-The default configuration is:
-
-```rust
 impl Default for TableStorageConfig {
     fn default() -> Self {
         Self {
@@ -163,52 +95,119 @@ impl Default for TableStorageConfig {
             compression: CompressionType::Lz4,
             enable_bloom_filter: true,
             enable_dictionary_encoding: true,
+            compaction_segment_threshold: 8,
+            compaction_row_group_threshold: 8,
+            enable_background_compaction: true,
+            background_compaction_interval_seconds: 60,
         }
     }
 }
 ```
 
-One accuracy detail matters here: `row_group_size` is a row count, not a byte size. The code chunks incoming rows into groups of at most that many rows.
+Field descriptions:
 
-## Write path: from rows to immutable segments
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `row_group_size` | `usize` | `16_384` | Maximum number of rows per row group. This is a **row count**, not a byte limit. |
+| `compression` | `CompressionType` | `Lz4` | Compression applied to each column chunk data file. Options: `None`, `Lz4`, `Zstd`. |
+| `enable_bloom_filter` | `bool` | `true` | Whether to write per-column bloom filter sidecar files for supported types. |
+| `enable_dictionary_encoding` | `bool` | `true` | Whether to dictionary-encode UTF-8 columns. |
+| `compaction_segment_threshold` | `usize` | `8` | Compact when there are at least this many segments in the table. |
+| `compaction_row_group_threshold` | `usize` | `8` | Compact when any segment has more than this many row groups. |
+| `enable_background_compaction` | `bool` | `true` | Whether the background compaction scheduler should process this table. |
+| `background_compaction_interval_seconds` | `u64` | `60` | Minimum seconds between background compaction passes for this table. |
 
-`TableWriter` is the main write abstraction.
+The `#[serde(default)]` attribute means that older `table.config.json` files written before the compaction fields were added will automatically get the default values on deserialization. This is a backwards-compatibility guarantee.
 
-It supports:
+---
 
-- database creation
-- table creation
+## 3. Naming helpers (`naming.rs`)
+
+`crates/storage/src/naming.rs` centralizes all file and directory name generation so the rest of the codebase never builds paths by hand.
+
+```rust
+/// segment_0, segment_1, ...
+pub fn segment_dir_name(segment_id: u64) -> String {
+    format!("segment_{}", segment_id)
+}
+
+/// row_group_000, row_group_001, ...
+pub fn row_group_dir_name(index: u64) -> String {
+    format!("row_group_{:03}", index)
+}
+
+/// col_0.data, col_1.data, ...
+pub fn column_chunk_file_name(column_id: u64) -> String {
+    format!("col_{}.data", column_id)
+}
+
+pub const SEGMENT_METADATA_FILE_NAME:  &str = "segment.meta";
+pub const SEGMENT_META_JSON_FILE_NAME: &str = "segment.meta.json";
+pub const ROW_GROUP_METADATA_FILE_NAME: &str = "row_group.meta";
+pub const TABLE_CONFIG_FILE_NAME:       &str = "table.config.json";
+```
+
+Key design note: `row_group_dir_name` zero-pads to three digits so directory listings sort numerically. `segment_dir_name` does not pad because segment IDs are assigned monotonically and sorting lexicographically by prefix already works.
+
+---
+
+## 4. Metadata persistence (`metadata_io.rs`)
+
+`crates/storage/src/metadata_io.rs` provides async helpers for reading and writing the two key metadata types:
+
+- `SegmentMetadata` — written to `segment.meta` (binary, `postcard`) and `segment.meta.json` (human-readable JSON mirror).
+- `RowGroupMetadata` — written to `row_group.meta`.
+
+The JSON copy of segment metadata is a deliberate teaching and debugging aid. It has no role in the read path; the engine always deserializes from the binary `postcard` file.
+
+### 4.1 `SegmentMetadata` struct
+
+```rust
+pub struct SegmentMetadata {
+    pub table_id: TableId,
+    pub total_rows: RowCount,
+    pub total_size_bytes: ByteCount,
+    pub row_groups: Vec<RowGroupMetadata>,
+    pub storage_config: TableStorageConfig,
+    pub created_at: TimestampMs,
+}
+```
+
+The inclusion of `storage_config` inside segment metadata lets any reader know the exact configuration that was active when the segment was written, regardless of what the current `table.config.json` says.
+
+### 4.2 `RowGroupMetadata` struct
+
+`RowGroupMetadata` stores:
+
+- `row_count`
+- a per-column `ColumnChunkDescriptor` for every column in the schema
+- `total_uncompressed_size_bytes`
+- `total_compressed_size_bytes`
+
+`ColumnChunkDescriptor` records whether dictionary encoding and bloom filters were used, the names of all sidecar files, compressed and uncompressed sizes, and the `ColumnStats` for that column.
+
+---
+
+## 5. Write path: rows → immutable segments
+
+### 5.1 `TableWriter`
+
+`TableWriter` is the main write abstraction. It supports:
+
+- database and table creation
 - opening an existing table
 - inserting rows
 - ingesting JSON and NDJSON
 - clearing table data
-- replacing all rows
+- replacing all rows atomically
 
-### Theory
+The insert path in `TableWriter::insert_rows` works as follows:
 
-Analytical storage systems often separate ingest input format from physical layout. Adolap follows that pattern.
-
-- Input arrives row-oriented.
-- Storage is written column-oriented.
-- New writes are appended as new immutable segment directories.
-
-### Decision
-
-Adolap chooses immutable segment creation rather than mutating existing segments. That keeps write logic simpler and makes metadata generation straightforward.
-
-### Implementation in this repo
-
-The insert path in `TableWriter::insert_rows` is structurally:
-
-1. validate input rows against the schema
-2. split rows into row groups using `row_group_size.max(1)`
-3. transpose each row group into per-column buffers
-4. allocate the next segment id by scanning existing `segment_*` directories
-5. write a new segment directory through `SegmentWriter`
-
-That is the core conversion from row-oriented user input into Adolap's physical layout.
-
-Representative code path:
+1. Validate input rows against the schema.
+2. Split rows into chunks of at most `row_group_size` rows.
+3. For each chunk, transpose rows into per-column buffers using `MutableColumn`.
+4. Allocate the next segment ID by scanning existing `segment_*` directories.
+5. Write a new immutable segment directory through `SegmentWriter`.
 
 ```rust
 pub async fn insert_rows(&self, rows: &[Vec<Option<ColumnValue>>]) -> Result<usize, AdolapError> {
@@ -222,337 +221,222 @@ pub async fn insert_rows(&self, rows: &[Vec<Option<ColumnValue>>]) -> Result<usi
 }
 ```
 
-### Delete behavior is rewrite-based
+### 5.2 `MutableColumn`: row-to-column transposition
 
-This is an important repo-specific behavior that should be documented explicitly.
+`MutableColumn` is an internal enum used during `build_row_groups`. It accumulates values and a packed validity bitmap for one column as rows are pushed in one at a time, then converts to a final `ColumnInputOwned` for the writer.
 
-Adolap does not currently delete rows in place. In `crates/server/src/handler.rs`, `delete_rows`:
+```rust
+enum MutableColumn {
+    Utf8 { values: Vec<String>, validity: Vec<u8>, has_nulls: bool },
+    I32  { values: Vec<i32>,    validity: Vec<u8>, has_nulls: bool },
+    U32  { values: Vec<u32>,    validity: Vec<u8>, has_nulls: bool },
+    Bool { values: Vec<bool>,   validity: Vec<u8>, has_nulls: bool },
+}
+```
 
-1. reads the full table through `TableReader`
-2. computes a delete mask
-3. materializes surviving rows
-4. calls `TableWriter::replace_rows`
+Construction initializes `validity` to `vec![0xFF; row_count.div_ceil(8)]` — all bits set to 1 (not null). When a `None` value is pushed, `mark_null` clears the bit at the row's position and sets `has_nulls = true`.
 
-`replace_rows` clears existing segment directories and writes survivors back as fresh segments.
+`MutableColumn::finish` converts to `ColumnInputOwned`. If `has_nulls` is false, the validity bitmap is dropped (`validity: has_nulls.then_some(validity)`), saving space.
 
-That means deletes are logically correct but operationally full-table rewrites.
+This is the critical transposition point: input arrives row-oriented, `MutableColumn` accumulates column-oriented buffers, and the writer receives clean `ColumnInputOwned` values.
 
-## Segment design
+### 5.3 `replace_rows`: atomic full-table rewrite
 
-### Theory
+`replace_rows` is used by delete operations and by callers that need to overwrite a table's entire content safely. It uses a staging-and-backup pattern to avoid leaving the table in a broken state if the process crashes mid-write.
 
-A segment is a durable write unit containing multiple row groups and segment-level metadata. In larger systems, segments are often the unit of compaction, movement, and retention. Adolap uses them mainly as immutable append units.
+The constants that name the staging directories:
 
-### Decision
+```rust
+const REPLACE_STAGING_PREFIX: &str = ".replace_staging_";
+const REPLACE_BACKUP_PREFIX:  &str = ".replace_backup_";
+```
 
-Adolap stores each segment in its own directory and writes two forms of metadata:
+The sequence of steps:
 
-- a binary `segment.meta` file used by the engine
-- a JSON `segment.meta.json` file used for debugging and inspection
+1. Write new segments into a `.replace_staging_<timestamp>` directory inside the table root.
+2. Rename each existing `segment_*` directory to `.replace_backup_<timestamp>_<id>`.
+3. Move the staging segments into the live table directory.
+4. Delete the backup directories.
 
-The JSON copy is a deliberate teaching and testing aid.
+If the process crashes between steps 2 and 3, the backup directories remain and can be recovered. On the next call, stale staging and backup directories from previous attempts are cleaned up first.
 
-### Implementation in this repo
+Tests verify that no staging or backup directories survive a successful `replace_rows` call.
+
+---
+
+## 6. Segment design
+
+### 6.1 `SegmentWriter`
 
 `SegmentWriter::write_segment`:
 
-1. creates the segment directory
-2. writes each row group under `row_group_000`, `row_group_001`, and so on
-3. accumulates total rows and compressed size
-4. serializes `SegmentMetadata` with `postcard`
-5. writes a pretty JSON mirror of the same metadata
+1. Creates the segment directory.
+2. Writes each row group under `row_group_000`, `row_group_001`, etc., via `RowGroupWriter`.
+3. Accumulates `total_rows` and `total_size_bytes`.
+4. Serializes `SegmentMetadata` with `postcard` to `segment.meta`.
+5. Writes a pretty-printed JSON mirror to `segment.meta.json`.
 
-Naming helpers live in `crates/storage/src/naming.rs`:
+---
 
-- `segment_<id>` for segment directories
-- `row_group_<nnn>` for row-group directories
-- `segment.meta` for segment metadata
-- `segment.meta.json` for debug/test readability
+## 7. Null bitmap representation (`null.rs`)
+
+Adolap uses packed validity bitmaps to track nullability. Each byte holds 8 row positions. A bit value of `1` means the row is **not null**; `0` means null.
 
-`SegmentMetadata` stores:
+```rust
+/// Return whether a row is null for a validity bitmap.
+pub fn is_null(validity: Option<&[u8]>, index: usize) -> bool {
+    match validity {
+        None => false,
+        Some([]) => false,
+        Some(bits) => {
+            let Some(byte_index) = bits.get(index / 8) else {
+                return false;
+            };
+            let mask = 1 << (index % 8);
+            (byte_index & mask) == 0
+        }
+    }
+}
+```
 
-- `table_id`
-- `total_rows`
-- `total_size_bytes`
-- `row_groups`
-- `storage_config`
-- `created_at`
+Important correctness rule: both `None` and `Some([])` (empty slice) are treated as "no nulls present." This handles the case where callers pass missing or empty validity metadata during stats computation and materialization.
 
-The inclusion of `storage_config` inside segment metadata is useful because it lets a segment carry the configuration context that was active when it was written.
+`count_nulls(bits, len)` counts null positions by iterating over `0..len` and calling `is_null`.
 
-## Row-group design
+Validity bitmaps are omitted entirely when `has_nulls` is false — `clear_redundant_validity` (in the column writer path) removes bitmaps that are all `1` bits.
 
-### Theory
+---
 
-A row group is a chunk of rows stored together, with a separate chunk per column. It is a useful compromise:
+## 8. Column statistics (`stats.rs`)
 
-- smaller than a full table scan
-- larger than single-row storage
-- large enough to amortize metadata cost
-- small enough to prune selectively
+### 8.1 `ColumnStats` struct
 
-### Decision
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnStats {
+    pub min: Option<Vec<u8>>,
+    pub max: Option<Vec<u8>>,
+    pub null_count: u32,
+    pub distinct_count: u32,
+}
+```
 
-Adolap makes row groups the smallest pruning unit and writes row-group metadata in a dedicated file.
+`min` and `max` are stored as raw bytes serialized with `postcard`. This is type-agnostic — the reader must know the column type to deserialize them correctly.
 
-### Implementation in this repo
+### 8.2 `compute_*` functions
 
-`RowGroupWriter::write_row_group`:
+Type-specific helpers compute stats over a value slice and an optional validity bitmap:
 
-1. validates that the number of provided columns matches the schema
-2. creates the row-group directory
-3. writes each column chunk through `ColumnChunkWriter`
-4. computes total compressed and uncompressed sizes
-5. writes `row_group.meta`
+- `compute_utf8_column_stats(values: &[String], validity: Option<&[u8]>)`
+- `compute_i32_column_stats(values: &[i32], validity: Option<&[u8]>)`
+- `compute_u32_column_stats(values: &[u32], validity: Option<&[u8]>)`
+- `compute_bool_column_stats(values: &[bool], validity: Option<&[u8]>)`
 
-`RowGroupMetadata` stores:
+Each function:
+1. Skips null positions (checked via `is_null`).
+2. Tracks `min` and `max` over non-null values.
+3. Counts distinct non-null values using a `HashSet`.
+4. Counts nulls via `count_nulls`.
+5. Returns `ColumnStats::empty()` if all values are null or the slice is empty.
 
-- `row_count`
-- column descriptors for every column
-- `total_uncompressed_size_bytes`
-- `total_compressed_size_bytes`
+Min and max are serialized with `postcard::to_allocvec` before being stored in the struct.
 
-That metadata becomes the base input for later pruning and storage inspection.
+---
 
-## Column chunk design
+## 9. Compaction
 
-Column chunks are where most of the physical storage decisions become visible.
+Adolap writes one new immutable segment per `insert_rows` call. Without compaction, a table with many small inserts accumulates many tiny segments, which degrades read performance. The compaction subsystem merges segments and consolidates row groups.
 
-### Theory
+### 9.1 `SegmentCompactor::needs_compaction`
 
-Columnar storage keeps values from the same column together so analytical scans can:
+A table needs compaction when either of the following is true:
 
-- read only needed columns
-- compress similar values well
-- compute statistics naturally
-- prune more intelligently
+- The number of `segment_*` directories is ≥ `compaction_segment_threshold` (default 8).
+- Any segment has more than `compaction_row_group_threshold` (default 8) row groups.
 
-### Decision
+```rust
+pub async fn needs_compaction(&self) -> Result<bool, AdolapError> {
+    let segments = discover_segments(&self.table.table_dir).await?;
+    if segments.len() >= self.table.storage_config.compaction_segment_threshold.max(1) {
+        return Ok(true);
+    }
+    for (_, metadata) in segments {
+        if metadata.row_groups.len() > self.table.storage_config.compaction_row_group_threshold.max(1) {
+            return Ok(true);
+        }
+        ...
+    }
+    Ok(false)
+}
+```
 
-Adolap stores one data file per column chunk plus optional sidecar files for dictionary encoding, bloom filters, and validity bitmaps.
+### 9.2 `SegmentCompactor::optimize`: the compaction algorithm
 
-This is deliberately explicit. Rather than inventing a single opaque file format, the repo favors decomposed files that expose how the storage features work.
+When compaction is triggered, `optimize`:
 
-### Implementation in this repo
+1. Reads all rows from all segments.
+2. Calculates an optimal number of output segments based on total row count and `row_group_size`.
+3. Writes rows into new segment directories under `.compacting_<timestamp>` prefixes.
+4. Atomically replaces the old segment directories with the new ones.
+5. Deletes old segment directories.
 
-`ColumnChunkWriter` writes:
+The result is fewer, larger segments each with a smaller number of row groups.
 
-- `column_<index>.data` for the compressed payload
-- `column_<index>.dict` for UTF-8 dictionary data when enabled
-- `column_<index>.bloom` through the bloom helper when enabled and supported
-- `column_<index>.valid` when a validity bitmap is needed
+### 9.3 `RowGroupCompactor`: intra-segment compaction
 
-Each `ColumnChunkDescriptor` records:
+`RowGroupCompactor::compact_segment` compacts the row groups within a single segment without merging across segments. It re-reads the segment's rows and rewrites them with the optimal row-group size. It is skipped if the current row-group count is already optimal.
 
-- the compression type
-- whether dictionary encoding was used
-- whether a bloom filter exists
-- data, dictionary, bloom, and validity file names
-- compressed and uncompressed sizes
-- column statistics
+### 9.4 `BackgroundCompactionScheduler`: autonomous compaction
 
-### Compression
+`BackgroundCompactionScheduler` in `crates/storage/src/background_compaction.rs` runs as a Tokio background task.
 
-Theory:
+```rust
+pub struct BackgroundCompactionScheduler {
+    data_root: PathBuf,
+    last_attempts: Arc<Mutex<HashMap<PathBuf, Instant>>>,
+}
+```
 
-- Column-oriented buffers are strong compression candidates.
+`spawn()` starts an infinite loop that:
 
-Decision:
+1. Calls `run_once()` every `SCHEDULER_POLL_INTERVAL_SECONDS` (5 seconds).
+2. `run_once` enumerates all tables via the `Catalog`.
+3. Skips tables where `enable_background_compaction` is false.
+4. Skips tables whose last compaction attempt was within `background_compaction_interval_seconds` (default 60s).
+5. Calls `SegmentCompactor::maybe_compact` for eligible tables.
 
-- Adolap compresses the final serialized column buffer using the table's configured compression type.
+The `last_attempts` map is keyed by table path and tracks when each table was last considered for compaction. This prevents hammering a table with compaction on every poll tick.
 
-Implementation:
+---
 
-- `finalize_column_write` calls `compress_buffer` before writing `column_<index>.data`.
-- `ColumnChunkReader` later calls `decompress_buffer` before decoding values.
+## 10. Statistics and pruning
 
-### Dictionary encoding
+### 10.1 Theory
 
-Theory:
+Metadata-driven pruning lets the engine skip row groups and segments entirely when a query predicate cannot match any value in that chunk.
 
-- Repeated strings often compress well with dictionary encoding because values are replaced with integer ids.
-
-Decision:
-
-- Adolap applies dictionary encoding only to UTF-8 columns and only when `enable_dictionary_encoding` is true.
-
-Implementation:
-
-- `write_utf8` chooses between plain string serialization and `encode_utf8_dictionary`.
-- Null string entries are represented as `u32::MAX` in the encoded index stream.
-- The actual dictionary is stored in `column_<index>.dict`.
-
-### Bloom filters
-
-Theory:
-
-- Bloom filters are useful for fast negative membership checks, especially for equality predicates.
-
-Decision:
-
-- Adolap writes bloom filters only when enabled in table config.
-- The generic writer path supports UTF-8, `i32`, and `u32` values.
-- The dedicated bool writer path does not emit bloom filters.
-
-Implementation:
-
-- `ColumnChunkWriter::write_bloom_filter` creates sidecar files for supported types.
-- `SegmentReader::prune_equals` uses the bloom filter before consulting min/max stats.
-
-### Validity bitmaps
-
-Theory:
-
-- Nullable columns need a compact way to say whether each row position is null.
-
-Decision:
-
-- Adolap uses packed validity bitmaps and omits them entirely when a column has no nulls.
-
-Implementation:
-
-- Row-building paths allocate a bitmap initialized to all `1` bits.
-- Null positions clear a bit.
-- `clear_redundant_validity` removes the bitmap when every bit is still `1`.
-- `null::is_null` treats `None` and `Some([])` as no-null cases.
-
-That last rule is an important correctness fix in this repo because callers may pass missing or empty validity information during stats and materialization.
-
-## Record batches as the in-memory boundary
-
-`RecordBatch` is the bridge between storage and execution.
-
-It contains:
-
-- a `TableSchema`
-- typed column buffers
-- optional per-column validity bitmaps
-- a row count
-
-Why this matters theoretically:
-
-- it keeps storage column-oriented
-- it avoids row-at-a-time execution
-- it keeps the in-memory API simple enough to understand
-
-Implementation in this repo:
-
-- `RowGroupReader` materializes each row group into a `RecordBatch`
-- `RecordBatch::to_rows` is used when row-oriented reconstruction is needed, such as delete-rewrite
-- `RecordBatch::from_rows` can rebuild a batch from validated row values
-
-This repo-specific detail also matters: the validity bitmaps must survive round-trips correctly. Dropping null metadata breaks delete-rewrite and any path that materializes rows back to storage.
-
-## Statistics and pruning
-
-### Theory
-
-Metadata-driven pruning is one of the defining ideas of analytical storage. If a query predicate can prove a chunk cannot match, the engine should skip that chunk before reading the data pages.
-
-### Decision
+### 10.2 Decision
 
 Adolap computes per-column stats for every row group and uses them, plus bloom filters, during segment reads.
 
-Current statistics include:
+Current statistics: `min`, `max`, `null_count`, `distinct_count`.
 
-- `min`
-- `max`
-- `null_count`
-- `distinct_count`
+Current pruning predicates: equality, greater-than, less-than, and conjunctions via `And`.
 
-The current pruning predicates are intentionally limited but useful:
-
-- equality
-- greater-than
-- less-than
-- conjunctions via `And`
-
-### Implementation in this repo
-
-Stats are computed in `crates/storage/src/stats.rs` when column chunks are written.
-
-Type-specific helpers exist for:
-
-- UTF-8
-- `i32`
-- `u32`
-- `bool`
-
-Min and max values are serialized with `postcard`, and null counts rely on the packed validity bitmap helpers.
+### 10.3 Implementation
 
 During reads, `SegmentReader`:
 
-1. loads `segment.meta`
-2. resolves projected column indices
-3. checks whether any row group might match the predicate
-4. evaluates bloom filters and min/max tests row group by row group
-5. reads only the surviving row groups via `RowGroupReader`
+1. Loads `segment.meta`.
+2. Resolves projected column indices.
+3. Checks row groups against the predicate using bloom filters and min/max stats.
+4. Reads only surviving row groups via `RowGroupReader`.
 
-The actual pruning methods are:
+Pruning methods: `prune_equals`, `prune_gt`, `prune_lt`.
 
-- `prune_equals`
-- `prune_gt`
-- `prune_lt`
+---
 
-This is not a full statistics engine, but it is a real metadata-driven scan avoidance mechanism.
-
-## Read path: table -> segment -> row group -> column chunk
-
-The read side is organized as a layered pipeline.
-
-### TableReader
-
-`TableReader` discovers `segment_*` directories, sorts them, and delegates each one to `SegmentReader`.
-
-Its job is orchestration across segments, not detailed pruning.
-
-### SegmentReader
-
-`SegmentReader` owns:
-
-- predicate pruning
-- projection index resolution
-- row-group iteration within a segment
-
-It makes pruning decisions before touching the actual column chunk payloads.
-
-### RowGroupReader
-
-`RowGroupReader` loads `row_group.meta`, selects projected columns, and uses `ColumnChunkReader` to materialize each selected column.
-
-### ColumnChunkReader
-
-`ColumnChunkReader`:
-
-1. reads and decompresses `column_<index>.data`
-2. loads the validity bitmap if present
-3. decodes plain or dictionary-encoded UTF-8 values
-4. decodes typed numeric or boolean vectors
-5. returns a `ColumnInputOwned`
-
-The read pipeline is deliberately layered because it keeps the responsibilities visible and makes it easier to debug where a storage bug lives.
-
-## Example physical layout
-
-Suppose you create:
-
-```text
-CREATE TABLE analytics.events (
-  event_id U32,
-  country Utf8,
-  revenue I32,
-  is_paying Bool
-) USING CONFIG (
-  row_group_size = 2,
-  compression = "lz4",
-  bloom_filter = true,
-  dictionary_encoding = true
-);
-```
-
-Then insert six rows.
-
-One plausible layout is:
+## 11. Example physical layout
 
 ```text
 data/
@@ -565,45 +449,31 @@ data/
         segment.meta.json
         row_group_000/
           row_group.meta
-          column_0.data
-          column_1.data
-          column_1.dict
-          column_1.bloom
-          column_2.data
-          column_2.bloom
-          column_3.data
+          col_0.data
+          col_1.data
+          col_1.bloom
+          col_2.data
+          col_2.bloom
+          col_3.data
         row_group_001/
-          ...
-        row_group_002/
           ...
 ```
 
-With `row_group_size = 2`, six rows become three row groups. That is why `\segments analytics.events` and `\stats analytics.events` are especially informative when testing with small datasets.
+With `row_group_size = 2`, six inserted rows produce three row groups inside a single segment. After enough inserts push the segment count past `compaction_segment_threshold`, the background compactor merges them back into one.
 
-## Why these choices make sense for Adolap
+---
 
-The storage layer is a good match for the repository because it optimizes for:
+## 12. Read path summary
 
-- inspectability
-- correctness visibility
-- straightforward layering
-- realistic analytical techniques without excessive machinery
+| Layer | File | Responsibility |
+|---|---|---|
+| `TableReader` | `table_reader.rs` | Discovers `segment_*` directories, delegates to `SegmentReader` |
+| `SegmentReader` | `segment_reader.rs` | Predicate pruning, projection index resolution, row-group iteration |
+| `RowGroupReader` | `row_group_reader.rs` | Loads `row_group.meta`, selects projected columns |
+| `ColumnChunkReader` | `column_writer.rs` | Reads, decompresses, decodes column data, returns `ColumnInputOwned` |
 
-It demonstrates real storage-engine ideas while still being small enough to understand end to end.
+---
 
-## Future directions suggested by the current design
+## 13. Chapter takeaway
 
-The current storage shape leaves clear room for growth:
-
-- compaction or segment merge operations
-- richer projection pushdown
-- more predicate forms in pruning
-- more advanced stats
-- transactional metadata changes
-- better multi-segment maintenance policies
-
-The important point is that the existing structure already has the right seams for those experiments.
-
-## Chapter takeaway
-
-Adolap's storage engine is not just a persistence detail. It is a deliberate teaching surface. Logical tables are resolved through a real catalog, rows are converted into immutable segmented columnar storage, metadata is written in a way that supports inspection and pruning, and the read path turns those physical structures back into `RecordBatch` values for execution.
+Adolap's storage engine is a deliberate teaching surface. Logical tables are resolved through a real catalog, rows are converted into immutable segmented columnar storage, metadata is written in a way that supports inspection and pruning, a background compaction scheduler keeps the segment count under control, and the read path turns physical structures back into `RecordBatch` values for execution. Every layer is visible on disk.

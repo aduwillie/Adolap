@@ -4,19 +4,21 @@
 
 This chapter explains how Adolap turns text into executable work. It covers:
 
-- the AQL language
-- statement parsing
-- logical plans
-- optimization
-- binding against catalog metadata
-- physical plan creation
-- execution
+1. The AQL language and its statement families.
+2. Statement parsing and the recursive-descent expression parser.
+3. Logical plans.
+4. Optimization.
+5. Binding against catalog metadata.
+6. Physical plan creation and pushdown.
+7. Execution.
 
-## AQL is intentionally small and line-oriented
+---
 
-The parser documentation describes AQL as SQL-like but simplified and line-oriented. That is an important design choice. It keeps the language easy to parse and easy to extend.
+## 1. AQL: design philosophy
 
-An example query from the parser module captures the style well:
+AQL (Adolap Query Language) is SQL-like but deliberately simplified and line-oriented. Each clause occupies its own line. This keeps the language easy to parse, easy to read, and easy to extend without a grammar generator.
+
+Example:
 
 ```text
 FROM analytics.events
@@ -27,317 +29,105 @@ GROUP BY country, device
 AGG SUM(revenue)
 ```
 
-Instead of trying to mimic every part of SQL, AQL emphasizes a predictable clause-per-line structure.
+---
 
-## Supported statement families
+## 2. The `Statement` enum
 
-The parser currently handles more than just queries. The `Statement` enum includes:
-
-- `Query`
-- `CreateDatabase`
-- `DropDatabase`
-- `CreateTable`
-- `DropTable`
-- `InsertRows`
-- `DeleteRows`
-- `IngestInto`
-
-That means the same text protocol supports both analytical queries and operational table management.
-
-## Query clauses
-
-The query parser recognizes these clauses:
-
-- `FROM`
-- `JOIN`
-- `SELECT`
-- `FILTER`
-- `GROUP BY`
-- `GROUP FILTER`
-- `AGG`
-- `ORDER BY`
-- `LIMIT`
-- `OFFSET`
-- `SKIP`
-
-### Example: projection and filtering
-
-```text
-FROM analytics.events
-SELECT country, revenue
-FILTER revenue > 50;
-```
-
-### Example: join
-
-```text
-FROM analytics.events
-JOIN analytics.users ON user_id = id
-SELECT country, revenue;
-```
-
-### Example: grouped aggregate with post-aggregate filtering
-
-```text
-FROM analytics.events
-SELECT country
-GROUP BY country
-AGG SUM(revenue)
-GROUP FILTER SUM(revenue) > 100
-ORDER BY SUM(revenue) DESC;
-```
-
-This is one of the more interesting parts of the language because `GROUP FILTER` behaves like a grouped post-aggregation predicate.
-
-## Expression parsing
-
-Filter expressions support:
-
-- `=`
-- `>`
-- `<`
-- `AND`
-- `OR`
-- parentheses
-- identifiers
-- string literals
-- integer literals
-
-The parser uses recursive descent with operator precedence:
-
-1. `OR`
-2. `AND`
-3. comparison
-4. primary expressions
-
-That gives you predictable boolean behavior without a parser generator.
-
-## The logical plan
-
-Once text is parsed, Adolap builds a `LogicalPlan` tree. The logical plan is one of the best places to understand the engine because it names the key operations explicitly.
-
-Representative shape:
+The parser entry point `parse_statement` produces a `Statement`. The full enum from `crates/exec/src/parser.rs`:
 
 ```rust
-pub enum LogicalPlan {
-    Scan { table_ref: String, table: Option<TableMetadata> },
-    Filter { input: Box<LogicalPlan>, predicate: Expr },
-    Project { input: Box<LogicalPlan>, columns: Vec<String> },
-    Aggregate { ... },
-    GroupFilter { ... },
-    Join { ... },
-    Sort { ... },
-    Limit { ... },
+pub enum Statement {
+    Query(LogicalPlan),
+    CreateDatabase { name: String },
+    DropDatabase { name: String },
+    CreateTable { table: String, schema: TableSchema, storage_config: TableStorageConfig },
+    DropTable { table: String },
+    InsertRows { table: Option<String>, rows: Vec<Vec<Option<ColumnValue>>> },
+    DeleteRows { table: String, predicate: Option<Expr> },
+    IngestInto { table: String, file_path: String },
 }
 ```
 
-The logical plan is not yet executable. It still needs binding and physical planning.
+`Query` wraps a `LogicalPlan`. Everything else is a DDL or DML operation. The same text protocol handles both analytical queries and table lifecycle management.
 
-## Optimization
+---
 
-The optimizer is intentionally simple today, which is a good fit for a learning project. The current rule pushes a `Filter` below a `Project` when possible.
+## 3. Query clauses
 
-The code says this directly:
+The query parser (`parse_query_aql`) recognizes these clauses:
 
-```rust
-// For now, just a simple recursive pass that:
-// - pushes Filter below Project when possible
-// - leaves everything else as-is
-```
+| Clause | Description |
+|---|---|
+| `FROM <table>` | Required. Names the base table. |
+| `JOIN <table> ON <col> = <col>` | Inner join on a single equality. |
+| `SELECT <col>, ...` | Projection. |
+| `FILTER <expr>` | Row filter. Multiple `FILTER` lines are ANDed together. |
+| `GROUP BY <col>, ...` | Grouping keys for aggregation. |
+| `AGG <func>(<col>)` | Aggregation function applied after grouping. |
+| `GROUP FILTER <agg_expr>` | Post-aggregation predicate (like SQL `HAVING`). |
+| `ORDER BY <expr> [ASC\|DESC]` | Sort specification. |
+| `LIMIT <n>` | Maximum output rows. |
+| `OFFSET <n>` / `SKIP <n>` | Number of leading rows to skip. |
 
-This is worth noting because it shows a realistic optimization idea with a small implementation footprint. The engine does not pretend to be a fully cost-based optimizer.
+### 3.1 OFFSET and SKIP are identical
 
-## Binding against catalog metadata
-
-Binding is where symbolic query text becomes schema-aware.
-
-The planner binds scans through the catalog:
-
-```rust
-pub async fn bind_plan(catalog: &Catalog, plan: LogicalPlan) -> Result<LogicalPlan, AdolapError>
-```
-
-Important things binding does:
-
-- resolve table references to actual `TableMetadata`
-- validate column references against schemas
-- canonicalize column names
-- derive aggregate output columns
-- resolve grouped `ORDER BY` and `GROUP FILTER`
-- construct join output schemas
-
-The bind step is where a lot of correctness lives. It prevents later layers from having to guess what a user meant.
-
-## Physical plan creation and pushdown
-
-After binding, the planner creates a `PhysicalPlan`. This is where execution details such as scan projection and pushed predicates are chosen.
-
-The planner entrypoint is:
+Both `OFFSET` and `SKIP` call the same builder method:
 
 ```rust
-pub fn create_physical_plan<'a>(plan: &'a LogicalPlan) -> Result<PhysicalPlan<'a>, AdolapError>
+} else if line.starts_with("OFFSET ") {
+    builder = builder.offset(parse_usize_clause("OFFSET", &line[7..])?);
+} else if line.starts_with("SKIP ") {
+    builder = builder.offset(parse_usize_clause("SKIP", &line[5..])?);
+}
 ```
 
-The internal helper `create_physical_plan_with_pushdown` shows an important design direction: the planner tracks required columns and pushdown filters so scans can avoid unnecessary work.
+They produce the same `offset` field in `LogicalPlan::Limit`. There is no semantic difference.
 
-That means even though Adolap is compact, it is already thinking in terms of:
+---
 
-- projection pushdown
-- filter pushdown
-- schema-aware scans
+## 4. Recursive-descent expression parser
 
-## Execution
+Filter expressions are parsed by a hand-written recursive-descent parser with the following precedence chain (lowest to highest):
 
-The `Executor` walks the physical plan and returns batches. It handles:
+```
+parse_expr
+  └─ parse_or
+       └─ parse_and
+            └─ parse_comparison   (=, >, <)
+                 └─ parse_primary  (column, literal, agg ref, parenthesized expr)
+```
 
-- scan
-- filter
-- project
-- aggregate
-- group filter
-- hash join
-- sort
-- limit/offset
-
-The main entrypoint is:
+Key functions from `parser.rs`:
 
 ```rust
-pub fn execute<'b>(
-    &'b self,
-    plan: &'b PhysicalPlan<'b>,
-) -> Pin<Box<dyn Future<Output = Result<Vec<RecordBatch>, AdolapError>> + Send + 'b>>
+fn parse_expr(tokens: &[Token], pos: usize) -> Result<(Expr, usize), AdolapError>
+fn parse_or(tokens: &[Token], mut pos: usize) -> Result<(Expr, usize), AdolapError>
+fn parse_and(tokens: &[Token], mut pos: usize) -> Result<(Expr, usize), AdolapError>
+fn parse_comparison(tokens: &[Token], pos: usize) -> Result<(Expr, usize), AdolapError>
+fn parse_primary(tokens: &[Token], pos: usize) -> Result<(Expr, usize), AdolapError>
 ```
 
-This may look slightly heavy because of boxed async recursion, but it keeps the executor implementation direct and readable.
+`parse_primary` emits:
+- `Expr::Column(name)` for identifiers.
+- `Expr::Literal(Literal::Utf8(s))` for string literals.
+- `Expr::Literal(Literal::I32(v))` for integer literals.
+- `Expr::Aggregate { func, column }` for `SUM(col)`, `COUNT(col)`, etc.
+- A recursively parsed grouped expression for `(...)`.
 
-## The execution layer in practice
+---
 
-It helps to separate the execution layer from the parser and planner mentally.
+## 5. The `Expr` enum (predicate model)
 
-- The parser answers: what did the user ask for?
-- The planner answers: what operators should run?
-- The execution layer answers: how do we turn those operators into `RecordBatch` output?
-
-In this repository the execution layer is centered on:
-
-- `crates/exec/src/executor.rs`
-- `crates/exec/src/filter.rs`
-- `crates/exec/src/projection.rs`
-- `crates/exec/src/aggregate.rs`
-- `crates/exec/src/group_by.rs`
-- `crates/exec/src/query_engine.rs`
-
-That split matters because it keeps planning decisions separate from row materialization and operator behavior.
-
-### What the executor actually does
-
-For each physical operator, the executor either:
-
-- asks storage for batches
-- transforms existing batches
-- combines batches into a new batch
-
-The current operator behavior is:
-
-- `Scan`: open the table through `TableReader`, push down projection and segment predicates when available, and return batches from storage
-- `Filter`: evaluate a boolean mask and keep matching rows only
-- `Project`: keep only the requested columns
-- `HashAggregate`: compute global or grouped aggregates and materialize them back as a `RecordBatch`
-- `GroupFilter`: apply a post-aggregation predicate
-- `HashJoin`: materialize rows from both sides, build a hash map for the right side, and emit joined rows
-- `Sort`: materialize rows, sort them in memory, and rebuild a batch
-- `Limit`: materialize rows, apply offset and limit, and rebuild a batch
-
-That is intentionally simple. Adolap is not pretending to be a distributed vectorized engine. It is showing the core operator shapes cleanly.
-
-### Execution data model
-
-The execution layer uses `RecordBatch` as its in-memory exchange type.
-
-That means every operator can assume:
-
-- a schema is attached to the batch
-- values are stored column-wise
-- nullability is preserved through validity bitmaps
-
-That is why filter, projection, grouping, and result materialization all compose cleanly. They speak the same intermediate format.
-
-### Query execution pipeline end to end
-
-When the server executes a query, the path is:
-
-1. parse text into a `LogicalPlan`
-2. optimize the logical plan
-3. bind the plan against the catalog and schemas
-4. create a `PhysicalPlan`
-5. execute the physical plan into batches
-6. convert batches into a wire `ResultSet`
-7. attach compact plan strings and execution summary metadata to the response
-
-That last step is important for consumers of the CLI and protocol. The server is responsible for producing the plan display strings and the server-side execution metrics, not the client.
-
-## Compact plan display
-
-Earlier plan output used the Rust debug view of the plan trees, which exposed braces and internal struct layout. That was useful for debugging but poor for users and client tools.
-
-The server now formats both plans into compact arrow-based chains.
-
-Example logical plan:
-
-```text
-Scan(analytics.events) -> Filter(revenue > 50) -> Project(country, revenue) -> Sort(revenue DESC) -> Limit(limit=3, offset=0)
-```
-
-Example physical plan:
-
-```text
-Scan(table=analytics.events, projection=[country, revenue], predicate=revenue > 50) -> Sort(revenue DESC) -> Limit(limit=3, offset=0)
-```
-
-For joins, the join node keeps both branches inline instead of printing nested debug structs.
-
-Example:
-
-```text
-HashJoin(on=events.user_id = users.id, left=[Scan(events)], right=[Scan(users)]) -> Project(events.country, users.plan)
-```
-
-The point is not to losslessly serialize the plan tree. The point is to make the execution path easy to read quickly.
-
-## Query result sections and execution summary
-
-The CLI now renders query execution output in clearly separated sections so users and client tools can distinguish planning details from tabular results.
-
-The sections are:
-
-- `Query Summary`
-- `Logical Plan`
-- `Physical Plan`
-- `Query Results`
-
-The summary includes server-generated execution metrics such as:
-
-- row count
-- column count
-- batch count
-- server execution time in milliseconds
-
-When CLI timing or profile output is enabled, the summary also includes client-visible transport metrics such as round-trip time and response size.
-
-That separation is deliberate:
-
-- server metrics describe how long planning and execution took inside Adolap
-- client metrics describe how long the full request-response cycle took over the wire
-
-This makes the output more useful for both human inspection and future client integrations.
-
-## Predicate evaluation
-
-The current predicate system supports a useful but intentionally bounded set of boolean expressions. The `Expr` enum contains column references, literals, aggregate references, comparison nodes, and boolean conjunctions.
-
-Representative shape:
+From `crates/exec/src/predicate.rs`:
 
 ```rust
+pub enum Literal {
+    Utf8(String),
+    I32(i32),
+    U32(u32),
+    Bool(bool),
+}
+
 pub enum Expr {
     Column(String),
     Aggregate { func: AggFunc, column: String },
@@ -350,28 +140,326 @@ pub enum Expr {
 }
 ```
 
-The current evaluation path focuses on concrete combinations that are already needed by the engine. That keeps complexity under control while still enabling realistic queries.
+`Expr::evaluate_to_bool_mask` produces a `Vec<bool>` mask over a `RecordBatch`. The dispatch is:
 
-## End-to-end planning path in one place
+```rust
+Expr::Eq(lhs, rhs)  => compare_eq(lhs, rhs, batch),
+Expr::Gt(lhs, rhs)  => compare_gt(lhs, rhs, batch),
+Expr::Lt(lhs, rhs)  => compare_lt(lhs, rhs, batch),
+Expr::And(lhs, rhs) => and_mask(lhs, rhs, batch),
+Expr::Or(lhs, rhs)  => or_mask(lhs, rhs, batch),
+_ => Err(...)  // Column, Aggregate, Literal cannot be top-level bool predicates
+```
 
-The server handler shows the whole planning flow clearly:
+### 5.1 NULL comparison semantics
+
+Adolap does not have a dedicated `IS NULL` / `IS NOT NULL` predicate in `Expr`. The current comparison functions operate on concrete typed values. A null row position has its validity bit cleared; comparison functions that inspect the underlying value buffer at a null position will use the placeholder value (e.g., `0` for integers, empty string for UTF-8). This means null rows are not automatically excluded from `=`, `>`, or `<` comparisons at the execution layer — callers should be aware that nulls are not treated with three-valued logic in the current implementation.
+
+---
+
+## 6. Supported aggregation functions (`AggFunc`)
+
+From `crates/exec/src/aggregate.rs`:
+
+```rust
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+```
+
+AQL syntax and output column naming:
+
+| AQL syntax | `AggFunc` | Output column name |
+|---|---|---|
+| `COUNT(col)` | `Count` | `count(col)` |
+| `SUM(col)` | `Sum` | `sum(col)` |
+| `AVG(col)` | `Avg` | `avg(col)` |
+| `MIN(col)` | `Min` | `min(col)` |
+| `MAX(col)` | `Max` | `max(col)` |
+
+---
+
+## 7. The `LogicalPlan` enum
+
+From `crates/exec/src/logical_plan.rs`:
+
+```rust
+pub enum LogicalPlan {
+    Scan {
+        table_ref: String,
+        table: Option<TableMetadata>,
+    },
+    Filter {
+        input: Box<LogicalPlan>,
+        predicate: Expr,
+    },
+    Project {
+        input: Box<LogicalPlan>,
+        columns: Vec<String>,
+    },
+    Aggregate {
+        input: Box<LogicalPlan>,
+        group_keys: Vec<String>,
+        agg_column: String,
+        agg_func: AggFunc,
+    },
+    GroupFilter {
+        input: Box<LogicalPlan>,
+        predicate: Expr,
+    },
+    Join {
+        left: Box<LogicalPlan>,
+        right: Box<LogicalPlan>,
+        left_on: String,
+        right_on: String,
+        output_schema: Option<TableSchema>,
+    },
+    Sort {
+        input: Box<LogicalPlan>,
+        order_by: Vec<OrderBy>,
+    },
+    Limit {
+        input: Box<LogicalPlan>,
+        limit: Option<usize>,
+        offset: usize,
+    },
+}
+```
+
+`Scan.table` is `None` immediately after parsing; it is filled in during `bind_plan`. This is how the logical plan distinguishes an unbound from a bound scan.
+
+---
+
+## 8. Optimization
+
+The optimizer (`crates/exec/src/optimizer.rs`) performs a single recursive pass. Its current rule pushes a `Filter` below a `Project` when possible.
+
+```rust
+pub fn optimize(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Project { input, columns } => {
+            match optimize(*input) {
+                LogicalPlan::Filter { input: inner, predicate } => {
+                    let projected = LogicalPlan::Project { input: inner, columns };
+                    LogicalPlan::Filter {
+                        input: Box::new(optimize(projected)),
+                        predicate,
+                    }
+                }
+                other => LogicalPlan::Project {
+                    input: Box::new(other),
+                    columns,
+                },
+            }
+        }
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(optimize(*input)),
+            predicate,
+        },
+        LogicalPlan::Aggregate { input, group_keys, agg_column, agg_func } => {
+            LogicalPlan::Aggregate {
+                input: Box::new(optimize(*input)),
+                group_keys, agg_column, agg_func,
+            }
+        }
+        // ... Sort, Limit, GroupFilter, Join all recurse similarly
+        scan @ LogicalPlan::Scan { .. } => scan,
+    }
+}
+```
+
+The optimizer does not do cost estimation. It applies a single structural rule and recurses. New rules can be added as additional `match` arms.
+
+---
+
+## 9. Binding against catalog metadata (`bind_plan`)
+
+Binding is where symbolic query text becomes schema-aware. It is the phase that fills `Scan.table` with real `TableMetadata` and validates all column name references.
+
+### 9.1 Function signatures
+
+```rust
+pub async fn bind_plan(
+    catalog: &Catalog,
+    plan: LogicalPlan,
+) -> Result<LogicalPlan, AdolapError>
+
+pub fn create_physical_plan<'a>(
+    plan: &'a LogicalPlan,
+) -> Result<PhysicalPlan<'a>, AdolapError>
+```
+
+### 9.2 What binding does
+
+`bind_plan` works in two phases:
+
+**Phase 1 — `bind_scans`**: walks the tree and resolves each `Scan.table_ref` against the catalog:
+
+```rust
+LogicalPlan::Scan { table_ref, .. } => {
+    let table = catalog.resolve_table(&table_ref).await?;
+    Ok(LogicalPlan::Scan { table_ref, table: Some(table) })
+}
+```
+
+**Phase 2 — `bind_plan_node`**: walks the now-catalog-resolved tree and:
+
+- Validates every `Expr::Column` reference against the schema (`canonicalize_column_name`, `require_column`).
+- Resolves `Expr::Aggregate` nodes in `GROUP FILTER` and grouped `ORDER BY` expressions into plain `Expr::Column` references pointing at the aggregate output column.
+- Builds projected schemas for `Project` nodes (`project_schema`).
+- Builds aggregate output schemas for `Aggregate` nodes (`aggregate_schema`), adding an output column named `sum(col)`, `count(col)`, etc.
+- Derives the `output_schema` for `Join` nodes by concatenating both sides' schemas.
+
+Column name resolution uses `canonicalize_column_name`, which performs a case-insensitive match against the schema and returns the canonical (schema-declared) spelling. This is how `REVENUE` in a query matches `revenue` in the schema.
+
+---
+
+## 10. Physical plan creation and pushdown
+
+`create_physical_plan` calls the internal helper `create_physical_plan_with_pushdown`, passing an initially empty set of required columns and an empty filter list.
+
+```rust
+fn create_physical_plan_with_pushdown<'a>(
+    plan: &'a LogicalPlan,
+    required_columns: &BTreeSet<String>,
+    pushdown_filters: &[Expr],
+) -> Result<PhysicalPlan<'a>, AdolapError>
+```
+
+### 10.1 Projection pushdown
+
+At each `Project` node, the projected column names are added to `required_columns`. When a `Scan` is finally reached, `derive_scan_projection` computes the minimal column set the scan needs to materialize:
+
+```rust
+let projected_columns = derive_scan_projection(table_ref, &table.schema, required_columns);
+```
+
+If the projected set equals the full schema, `projected_columns` is `None` (no pruning needed).
+
+### 10.2 Filter pushdown
+
+At each `Filter` node, the predicate is split into conjuncts and added to `pushdown_filters`. When a `Scan` is reached, `build_pushdown_predicate` converts compatible `Expr` nodes into storage-layer `Predicate` values:
+
+```rust
+fn expr_to_pushdown_predicate(expr: &Expr) -> Option<Predicate> {
+    match expr {
+        Expr::Eq(lhs, rhs) => column_literal_predicate(lhs, rhs, Predicate::Equals),
+        Expr::Gt(lhs, rhs) => column_literal_predicate(lhs, rhs, Predicate::GreaterThan),
+        Expr::Lt(lhs, rhs) => column_literal_predicate(lhs, rhs, Predicate::LessThan),
+        ...
+    }
+}
+```
+
+Multiple predicates are combined with `Predicate::And`. Predicates that cannot be pushed (e.g., `OR` expressions) are left as `PhysicalPlan::Filter` nodes above the scan.
+
+### 10.3 `PhysicalPlan` enum
+
+From `crates/exec/src/physical_plan.rs`:
+
+```rust
+pub enum PhysicalPlan<'a> {
+    Scan {
+        table: &'a TableMetadata,
+        projected_columns: Option<Vec<String>>,
+        predicate: Option<Predicate>,
+    },
+    Filter {
+        input: Box<PhysicalPlan<'a>>,
+        predicate: Expr,
+    },
+    Project {
+        input: Box<PhysicalPlan<'a>>,
+        columns: Vec<String>,
+    },
+    HashAggregate {
+        input: Box<PhysicalPlan<'a>>,
+        group_keys: Vec<String>,
+        agg_column: String,
+        agg_func: AggFunc,
+    },
+    GroupFilter {
+        input: Box<PhysicalPlan<'a>>,
+        predicate: Expr,
+    },
+    HashJoin {
+        left: Box<PhysicalPlan<'a>>,
+        right: Box<PhysicalPlan<'a>>,
+        left_on: String,
+        right_on: String,
+        output_schema: TableSchema,
+    },
+    Sort {
+        input: Box<PhysicalPlan<'a>>,
+        order_by: Vec<OrderBy>,
+    },
+    Limit {
+        input: Box<PhysicalPlan<'a>>,
+        limit: Option<usize>,
+        offset: usize,
+    },
+}
+```
+
+`Scan.predicate` carries the pushed-down storage predicate, which `SegmentReader` uses for bloom-filter and min/max pruning before touching column data.
+
+---
+
+## 11. Execution
+
+The executor (`crates/exec/src/executor.rs`) walks the `PhysicalPlan` recursively and returns `Vec<RecordBatch>`.
+
+```rust
+pub fn execute<'b>(
+    &'b self,
+    plan: &'b PhysicalPlan<'b>,
+) -> Pin<Box<dyn Future<Output = Result<Vec<RecordBatch>, AdolapError>> + Send + 'b>>
+```
+
+The boxed async return type handles recursive async execution without stack overflow.
+
+### 11.1 Operator behaviors
+
+| Operator | Behavior |
+|---|---|
+| `Scan` | Opens table via `TableReader` with pushed projection and predicate. Returns storage batches. |
+| `Filter` | Calls `Expr::evaluate_to_bool_mask` on each batch, keeps matching rows. |
+| `Project` | Retains only requested columns from each batch. |
+| `HashAggregate` | Materializes all rows, groups by keys, computes aggregate, returns one output batch. |
+| `GroupFilter` | Applies post-aggregation predicate (like `HAVING`). |
+| `HashJoin` | Materializes both sides, builds a hash map on the right side, emits joined rows. |
+| `Sort` | Materializes all rows, sorts in memory, rebuilds a batch. |
+| `Limit` | Materializes rows, applies `offset` then `limit`, rebuilds a batch. |
+
+---
+
+## 12. End-to-end pipeline
+
+The server handler shows the complete flow:
 
 ```rust
 let optimized = optimizer::optimize(plan);
-let bound = planner::bind_plan(catalog, optimized).await?;
-let physical = planner::create_physical_plan(&bound)?;
+let bound     = planner::bind_plan(catalog, optimized).await?;
+let physical  = planner::create_physical_plan(&bound)?;
 
 let executor = Executor::new();
-let batches = executor.execute(&physical).await?;
+let batches  = executor.execute(&physical).await?;
 ```
 
-That is the central path to keep in mind when reading the engine.
+1. Parse text → `Statement::Query(LogicalPlan)`.
+2. Optimize the logical plan (filter-below-project).
+3. Bind scans to catalog metadata, validate column references.
+4. Create a `PhysicalPlan` with projection and filter pushdown.
+5. Execute into `Vec<RecordBatch>`.
+6. Serialize into a wire `ResultSet` with compact plan strings and execution summary.
 
-After execution, the server also formats the logical and physical plans into compact display strings and attaches a query summary before returning the final protocol message to the CLI.
+---
 
-## Example query and what happens
-
-Take this query:
+## 13. Example: tracing a query
 
 ```text
 FROM analytics.events
@@ -381,30 +469,14 @@ ORDER BY revenue DESC
 LIMIT 3;
 ```
 
-The engine does the following:
+1. **Parse**: `Scan("analytics.events") → Filter(revenue > 50) → Project([country, revenue]) → Sort(revenue DESC) → Limit(3, 0)`.
+2. **Optimize**: `Filter` is already below `Project`; no reordering needed.
+3. **Bind**: `analytics.events` resolved to `TableMetadata`; `revenue` and `country` validated against schema.
+4. **Physical plan**: `Scan(projection=[country,revenue], predicate=revenue>50) → Sort → Limit`.
+5. **Execute**: storage skips row groups where `max(revenue) ≤ 50`; surviving batches sorted and truncated.
 
-1. parse each clause into an internal plan description
-2. create a logical `Scan -> Filter -> Project -> Sort -> Limit` structure
-3. bind the `analytics.events` scan to actual table metadata from the catalog
-4. validate the `country` and `revenue` references against the schema
-5. derive a physical plan with pushed scan information where possible
-6. execute the plan against storage batches
-7. stringify the first result batch into a protocol result set for the CLI
+---
 
-## Why the planning layer matters
+## 14. Chapter takeaway
 
-The planning layer is the bridge between “nice user language” and “correct work over storage.” If you want to extend Adolap with new clauses or operators, this is where the architectural consequences become visible.
-
-Typical future extensions would likely touch:
-
-- parser
-- logical plan
-- binder
-- physical plan
-- executor
-
-That layered structure is a strong sign that the codebase has a sound shape for growth.
-
-## Chapter takeaway
-
-The key lesson is that Adolap’s planning pipeline is intentionally explicit. Text becomes a logical plan, the logical plan becomes a schema-aware bound plan, the bound plan becomes a physical plan, and the executor turns that into batches. Each phase is visible in the code and teachable on its own.
+Adolap's planning pipeline is intentionally explicit. Text becomes a logical plan, the logical plan becomes a schema-aware bound plan, the bound plan becomes a physical plan with pushdown, and the executor turns that into `RecordBatch` output. Each phase is a distinct, testable layer that can be extended independently.
