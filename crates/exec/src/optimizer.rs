@@ -56,3 +56,30 @@ pub fn optimize(plan: LogicalPlan) -> LogicalPlan {
         scan @ LogicalPlan::Scan { .. } => scan,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::optimize;
+    use crate::{logical_plan::LogicalPlan, predicate::col};
+
+    #[test]
+    fn rewrites_project_over_filter_into_filter_over_project() {
+        let plan = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Filter {
+                input: Box::new(LogicalPlan::scan("events")),
+                predicate: col("value"),
+            }),
+            columns: vec!["country".into()],
+        };
+
+        let optimized = optimize(plan);
+
+        match optimized {
+            LogicalPlan::Filter { input, .. } => match *input {
+                LogicalPlan::Project { columns, .. } => assert_eq!(columns, vec!["country"]),
+                other => panic!("expected projected child, got {:?}", other),
+            },
+            other => panic!("unexpected optimized plan: {:?}", other),
+        }
+    }
+}

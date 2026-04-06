@@ -10,3 +10,13 @@ pub mod types;
 pub mod time;
 pub mod util;
 pub mod id;
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn exports_shared_modules() {
+		let _ = crate::error::AdolapError::ExecutionError(String::new());
+		let _ = crate::logging::init_logging;
+		let _: crate::types::RowCount = 1;
+	}
+}

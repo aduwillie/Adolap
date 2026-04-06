@@ -152,3 +152,74 @@ impl AQLBuilder {
       plan
     }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::aql;
+  use crate::{
+    aggregate::AggFunc,
+    logical_plan::{LogicalPlan, OrderBy, OrderDirection},
+    predicate::{col, lit_i32, Expr},
+  };
+
+  #[test]
+  fn builder_combines_filters_and_applies_limit_ordering() {
+    let plan = aql()
+      .from("events")
+      .select(vec!["country"])
+      .filter(col("value").gt(lit_i32(10)))
+      .filter(col("value").lt(lit_i32(20)))
+      .order_by(vec![OrderBy {
+        expr: col("country"),
+        direction: OrderDirection::Asc,
+      }])
+      .limit(5)
+      .offset(2)
+      .build();
+
+    match plan {
+      LogicalPlan::Limit { input, limit, offset } => {
+        assert_eq!(limit, Some(5));
+        assert_eq!(offset, 2);
+        match *input {
+          LogicalPlan::Sort { input, order_by } => {
+            assert_eq!(order_by.len(), 1);
+            match *input {
+              LogicalPlan::Project { input, columns } => {
+                assert_eq!(columns, vec!["country"]);
+                match *input {
+                  LogicalPlan::Filter { predicate, .. } => match predicate {
+                    Expr::And(_, _) => {}
+                    other => panic!("expected combined filter predicate, got {:?}", other),
+                  },
+                  other => panic!("expected project input to be filter, got {:?}", other),
+                }
+              }
+              other => panic!("expected sort input to be project, got {:?}", other),
+            }
+          }
+          other => panic!("expected outer sort, got {:?}", other),
+        }
+      }
+      other => panic!("unexpected plan shape: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn group_by_requires_aggregate_column() {
+    let plan = aql()
+      .from("events")
+      .group_by(vec!["country"])
+      .agg(AggFunc::Sum, "value")
+      .build();
+
+    match plan {
+      LogicalPlan::Aggregate { group_keys, agg_column, agg_func, .. } => {
+        assert_eq!(group_keys, vec!["country"]);
+        assert_eq!(agg_column, "value");
+        assert!(matches!(agg_func, AggFunc::Sum));
+      }
+      other => panic!("unexpected plan shape: {:?}", other),
+    }
+  }
+}

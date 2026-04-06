@@ -1,39 +1,67 @@
 use crate::client::ClientResponse;
 use crate::meta::{OutputFormat, ReplSettings};
 use protocol::{MetaResult, QueryResult, ResultSet, ServerMessage};
+use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 pub fn print_response(response: ClientResponse, settings: &ReplSettings) {
-    match response.message {
-        ServerMessage::QueryResult(query_result) => print_query_result(&query_result, settings),
+    let ClientResponse {
+        message,
+        elapsed,
+        response_bytes,
+    } = response;
+
+    let is_query_result = matches!(message, ServerMessage::QueryResult(_));
+
+    match message {
+        ServerMessage::QueryResult(query_result) => {
+            print_query_result(&query_result, elapsed, response_bytes, settings)
+        }
         ServerMessage::MetaResult(meta_result) => print_meta_result(&meta_result),
         ServerMessage::Ok(message) => println!("{}", message),
         ServerMessage::Error(message) => eprintln!("Error: {}", message),
         ServerMessage::Pong => println!("PONG"),
     }
 
-    if settings.show_profile {
+    if settings.show_profile && !is_query_result {
         println!(
             "profile: elapsed={:.3} ms, response_bytes={}",
-            response.elapsed.as_secs_f64() * 1000.0,
-            response.response_bytes
+            elapsed.as_secs_f64() * 1000.0,
+            response_bytes
         );
-    } else if settings.show_timing {
-        println!("time: {:.3} ms", response.elapsed.as_secs_f64() * 1000.0);
+    } else if settings.show_timing && !is_query_result {
+        println!("time: {:.3} ms", elapsed.as_secs_f64() * 1000.0);
     }
 }
 
-pub fn print_query_result(query_result: &QueryResult, settings: &ReplSettings) {
-    println!("{}", render_query_result(query_result, settings));
+pub fn print_query_result(
+    query_result: &QueryResult,
+    elapsed: Duration,
+    response_bytes: usize,
+    settings: &ReplSettings,
+) {
+    println!("{}", render_query_result(query_result, elapsed, response_bytes, settings));
 }
 
-pub fn render_query_result(query_result: &QueryResult, settings: &ReplSettings) -> String {
+pub fn render_query_result(
+    query_result: &QueryResult,
+    elapsed: Duration,
+    response_bytes: usize,
+    settings: &ReplSettings,
+) -> String {
     let mut sections = Vec::new();
+    sections.push(render_section(
+        "Query Summary",
+        &render_query_summary(query_result, elapsed, response_bytes, settings),
+    ));
     if settings.show_plan {
-        sections.push(render_plan("Logical Plan", &query_result.logical_plan));
-        sections.push(render_plan("Physical Plan", &query_result.physical_plan));
+        sections.push(render_section("Logical Plan", &query_result.logical_plan));
+        sections.push(render_section("Physical Plan", &query_result.physical_plan));
     }
-    sections.push(render_result_set(&query_result.result_set, settings.output_format));
+    sections.push(render_section(
+        "Query Results",
+        &render_result_set(&query_result.result_set, settings.output_format),
+    ));
     sections.join("\n\n")
 }
 
@@ -107,8 +135,32 @@ fn render_delimited(result_set: &ResultSet, delimiter: &str) -> String {
     lines.join("\n")
 }
 
-fn render_plan(title: &str, content: &str) -> String {
-    format!("{}\n{}", title, content)
+fn render_section(title: &str, content: &str) -> String {
+    format!("=== {} ===\n{}", title, content)
+}
+
+fn render_query_summary(
+    query_result: &QueryResult,
+    elapsed: Duration,
+    response_bytes: usize,
+    settings: &ReplSettings,
+) -> String {
+    let mut lines = vec![
+        format!("rows: {}", query_result.summary.row_count),
+        format!("columns: {}", query_result.summary.column_count),
+        format!("batches: {}", query_result.summary.batch_count),
+        format!("server_execution_ms: {:.3}", query_result.summary.execution_time_ms),
+    ];
+
+    if settings.show_timing || settings.show_profile {
+        lines.push(format!("client_round_trip_ms: {:.3}", elapsed.as_secs_f64() * 1000.0));
+    }
+
+    if settings.show_profile {
+        lines.push(format!("response_bytes: {}", response_bytes));
+    }
+
+    lines.join("\n")
 }
 
 fn column_widths(result_set: &ResultSet) -> Vec<usize> {
@@ -223,7 +275,8 @@ impl BoxStyle {
 mod tests {
     use super::{render_query_result, render_result_set};
     use crate::meta::{OutputFormat, ReplSettings};
-    use protocol::{QueryResult, ResultRow, ResultSet};
+    use protocol::{QueryResult, QuerySummary, ResultRow, ResultSet};
+    use std::time::Duration;
 
     #[test]
     fn renders_unicode_table() {
@@ -287,15 +340,21 @@ mod tests {
                         values: vec!["US".into()],
                     }],
                 },
-                logical_plan: "LogicalPlan::Project".into(),
-                physical_plan: "PhysicalPlan::Project".into(),
+                logical_plan: "Scan(events) -> Project(country)".into(),
+                physical_plan: "Scan(table=default.events) -> Project(country)".into(),
+                summary: QuerySummary::new(1, 1, 1, 1.5),
             },
+            Duration::from_millis(2),
+            128,
             &ReplSettings::default(),
         );
 
-        assert!(output.contains("Logical Plan"));
-        assert!(output.contains("Physical Plan"));
-        assert!(output.contains("LogicalPlan::Project"));
+        assert!(output.contains("=== Query Summary ==="));
+        assert!(output.contains("=== Logical Plan ==="));
+        assert!(output.contains("=== Physical Plan ==="));
+        assert!(output.contains("=== Query Results ==="));
+        assert!(output.contains("Scan(events) -> Project(country)"));
+        assert!(output.contains("server_execution_ms: 1.500"));
     }
 
     #[test]
@@ -311,12 +370,41 @@ mod tests {
                         values: vec!["US".into()],
                     }],
                 },
-                logical_plan: "LogicalPlan::Project".into(),
-                physical_plan: "PhysicalPlan::Project".into(),
+                logical_plan: "Scan(events) -> Project(country)".into(),
+                physical_plan: "Scan(table=default.events) -> Project(country)".into(),
+                summary: QuerySummary::new(1, 1, 1, 1.5),
             },
+            Duration::from_millis(2),
+            128,
             &settings,
         );
 
         assert!(!output.contains("Logical Plan"));
+    }
+
+    #[test]
+    fn profile_summary_includes_client_metrics() {
+        let mut settings = ReplSettings::default();
+        settings.show_profile = true;
+
+        let output = render_query_result(
+            &QueryResult {
+                result_set: ResultSet {
+                    columns: vec!["country".into()],
+                    rows: vec![ResultRow {
+                        values: vec!["US".into()],
+                    }],
+                },
+                logical_plan: "Scan(events)".into(),
+                physical_plan: "Scan(table=default.events)".into(),
+                summary: QuerySummary::new(1, 1, 1, 1.25),
+            },
+            Duration::from_millis(5),
+            512,
+            &settings,
+        );
+
+        assert!(output.contains("client_round_trip_ms: 5.000"));
+        assert!(output.contains("response_bytes: 512"));
     }
 }

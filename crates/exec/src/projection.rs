@@ -24,3 +24,33 @@ pub fn project(record_batch: &RecordBatch, columns: &[&str]) -> Result<RecordBat
     row_count: record_batch.row_count,
   })
 }
+
+  #[cfg(test)]
+  mod tests {
+    use super::project;
+    use storage::{
+      column::ColumnValue,
+      record_batch::RecordBatch,
+      schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    #[test]
+    fn projects_requested_columns_only() {
+      let batch = RecordBatch::from_rows(
+        TableSchema {
+          columns: vec![
+            ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+            ColumnSchema { name: "name".into(), column_type: ColumnType::Utf8, nullable: false },
+          ],
+        },
+        &[vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("alpha".into()))]],
+      )
+      .unwrap();
+
+      let projected = project(&batch, &["name"]).unwrap();
+
+      assert_eq!(projected.schema.columns.len(), 1);
+      assert_eq!(projected.schema.columns[0].name, "name");
+      assert_eq!(projected.to_rows().unwrap(), vec![vec![Some(ColumnValue::Utf8("alpha".into()))]]);
+    }
+  }

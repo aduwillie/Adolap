@@ -23,3 +23,11 @@ async fn main() {
         std::process::exit(1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn main_entrypoint_is_linked() {
+        let _entrypoint: fn() = super::main;
+    }
+}

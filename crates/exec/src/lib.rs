@@ -19,3 +19,13 @@ pub mod planner;
 
 pub mod dsl;
 pub mod parser;
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn exports_planning_and_parser_surface() {
+		let sum = crate::aggregate::sum("value");
+		assert_eq!(sum.1, "value");
+		assert!(crate::parser::parse_statement("CREATE DATABASE analytics").is_ok());
+	}
+}

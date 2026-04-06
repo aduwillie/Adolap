@@ -1,5 +1,5 @@
 use crate::message::{
-    ClientMessage, ColumnDefinition, ColumnType, MetaResult, ProtocolResult, QueryResult, ResultRow, ResultSet,
+    ClientMessage, ColumnDefinition, ColumnType, MetaResult, ProtocolResult, QueryResult, QuerySummary, ResultRow, ResultSet,
     ScalarValue, ServerMessage,
 };
 use core::error::AdolapError;
@@ -238,6 +238,10 @@ fn write_query_result(out: &mut Vec<u8>, query_result: &QueryResult) {
     write_result_set(out, &query_result.result_set);
     write_string(out, &query_result.logical_plan);
     write_string(out, &query_result.physical_plan);
+    write_u32(out, query_result.summary.row_count as u32);
+    write_u32(out, query_result.summary.column_count as u32);
+    write_u32(out, query_result.summary.batch_count as u32);
+    write_f64(out, query_result.summary.execution_time_ms);
 }
 
 fn write_meta_result(out: &mut Vec<u8>, meta_result: &MetaResult) {
@@ -270,7 +274,16 @@ fn read_query_result(cur: &mut Cursor<&[u8]>) -> ProtocolResult<QueryResult> {
     let result_set = read_result_set(cur)?;
     let logical_plan = read_string(cur)?;
     let physical_plan = read_string(cur)?;
-    Ok(QueryResult::new(result_set, logical_plan, physical_plan))
+    let row_count = read_u32(cur)? as usize;
+    let column_count = read_u32(cur)? as usize;
+    let batch_count = read_u32(cur)? as usize;
+    let execution_time_ms = read_f64(cur)?;
+    Ok(QueryResult::new(
+        result_set,
+        logical_plan,
+        physical_plan,
+        QuerySummary::new(row_count, column_count, batch_count, execution_time_ms),
+    ))
 }
 
 fn read_meta_result(cur: &mut Cursor<&[u8]>) -> ProtocolResult<MetaResult> {
@@ -282,6 +295,10 @@ fn read_meta_result(cur: &mut Cursor<&[u8]>) -> ProtocolResult<MetaResult> {
 // -----------------------------
 
 fn write_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+fn write_f64(out: &mut Vec<u8>, v: f64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
@@ -375,6 +392,13 @@ fn read_u32(cur: &mut Cursor<&[u8]>) -> ProtocolResult<u32> {
     Ok(u32::from_be_bytes(buf))
 }
 
+fn read_f64(cur: &mut Cursor<&[u8]>) -> ProtocolResult<f64> {
+    let mut buf = [0u8; 8];
+    cur.read_exact(&mut buf)
+        .map_err(|e| AdolapError::ExecutionError(format!("read_f64: {}", e)))?;
+    Ok(f64::from_be_bytes(buf))
+}
+
 fn read_string(cur: &mut Cursor<&[u8]>) -> ProtocolResult<String> {
     let len = read_u32(cur)? as usize;
     let mut buf = vec![0u8; len];
@@ -435,7 +459,7 @@ fn read_scalar_value(cur: &mut Cursor<&[u8]>) -> ProtocolResult<ScalarValue> {
 #[cfg(test)]
 mod tests {
     use super::{decode_client_message, decode_server_message, encode_client_message, encode_server_message};
-    use crate::message::{ClientMessage, ColumnDefinition, ColumnType, MetaResult, QueryResult, ResultRow, ResultSet, ScalarValue, ServerMessage};
+    use crate::message::{ClientMessage, ColumnDefinition, ColumnType, MetaResult, QueryResult, QuerySummary, ResultRow, ResultSet, ScalarValue, ServerMessage};
 
     #[test]
     fn round_trips_create_table() {
@@ -519,6 +543,7 @@ mod tests {
             ),
             "LogicalPlan::Project".to_string(),
             "PhysicalPlan::Project".to_string(),
+            QuerySummary::new(1, 1, 1, 2.5),
         ));
 
         let decoded = decode_server_message(&encode_server_message(&message)).unwrap();
@@ -527,6 +552,10 @@ mod tests {
                 assert_eq!(query_result.result_set.columns, vec!["country"]);
                 assert_eq!(query_result.logical_plan, "LogicalPlan::Project");
                 assert_eq!(query_result.physical_plan, "PhysicalPlan::Project");
+                assert_eq!(query_result.summary.row_count, 1);
+                assert_eq!(query_result.summary.column_count, 1);
+                assert_eq!(query_result.summary.batch_count, 1);
+                assert!((query_result.summary.execution_time_ms - 2.5).abs() < f64::EPSILON);
             }
             other => panic!("unexpected message: {:?}", other),
         }

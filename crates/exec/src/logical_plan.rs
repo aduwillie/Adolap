@@ -134,3 +134,31 @@ impl LogicalPlan {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LogicalPlan, OrderBy, OrderDirection};
+    use crate::{aggregate::AggFunc, predicate::col};
+
+    #[test]
+    fn builder_methods_wrap_plan_nodes_in_order() {
+        let plan = LogicalPlan::scan("events")
+            .filter(col("value"))
+            .project(vec!["country"])
+            .aggregate(vec!["country"], "value", AggFunc::Sum)
+            .sort(vec![OrderBy {
+                expr: col("country"),
+                direction: OrderDirection::Desc,
+            }])
+            .limit(Some(10), 4);
+
+        match plan {
+            LogicalPlan::Limit { input, limit, offset } => {
+                assert_eq!(limit, Some(10));
+                assert_eq!(offset, 4);
+                assert!(matches!(*input, LogicalPlan::Sort { .. }));
+            }
+            other => panic!("unexpected plan: {:?}", other),
+        }
+    }
+}

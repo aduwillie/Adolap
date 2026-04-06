@@ -5,6 +5,7 @@
 //! active server process rather than the client's local filesystem.
 
 use adolap_core::error::AdolapError;
+use crate::handler::{format_logical_plan, format_physical_plan};
 use exec::optimizer;
 use exec::parser::{Statement, parse_statement};
 use exec::planner;
@@ -485,9 +486,9 @@ async fn explain_query(catalog: &Catalog, query: &str) -> Result<String, AdolapE
     let memory = system.process(pid).map(|process| process.memory()).unwrap_or_default();
 
     Ok(format!(
-        "Logical Plan\n{:#?}\n\nPhysical Plan\n{:#?}\n\nServer Memory\n  rss_bytes: {}",
-        bound,
-        physical,
+        "=== Logical Plan ===\n{}\n\n=== Physical Plan ===\n{}\n\n=== Server Summary ===\nserver_rss_bytes: {}",
+        format_logical_plan(&bound),
+        format_physical_plan(&physical),
         memory,
     ))
 }

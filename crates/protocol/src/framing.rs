@@ -69,3 +69,27 @@ where
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{read_frame, write_frame};
+    use tokio::io::duplex;
+    use tokio::runtime::Runtime;
+
+    #[test]
+    fn round_trips_a_single_length_prefixed_frame() {
+        Runtime::new().unwrap().block_on(async {
+            let (mut writer, mut reader) = duplex(64);
+            let expected = b"ping-payload".to_vec();
+
+            let writer_task = tokio::spawn(async move {
+                write_frame(&mut writer, &expected).await.unwrap();
+            });
+
+            let actual = read_frame(&mut reader).await.unwrap();
+            writer_task.await.unwrap();
+
+            assert_eq!(actual, b"ping-payload");
+        });
+    }
+}

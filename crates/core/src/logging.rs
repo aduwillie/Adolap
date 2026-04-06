@@ -18,3 +18,14 @@ pub fn init_logging(service_name: &str) {
 
     tracing::info!(%service_name, "logging initialized");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::init_logging;
+
+    #[test]
+    fn init_logging_is_idempotent() {
+        init_logging("core-tests");
+        init_logging("core-tests");
+    }
+}

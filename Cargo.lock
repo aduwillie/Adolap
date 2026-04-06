@@ -165,6 +165,8 @@ dependencies = [
  "core",
  "serde_json",
  "storage",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 

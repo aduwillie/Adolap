@@ -698,3 +698,49 @@ fn require_column<'a>(
         .ok_or_else(|| AdolapError::ExecutionError(format!("Unknown column: {}", column)))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{canonicalize_column_name, derive_scan_projection};
+    use std::collections::BTreeSet;
+    use storage::schema::{ColumnSchema, ColumnType, TableSchema};
+
+    fn qualified_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![
+                ColumnSchema { name: "events.id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "events.country".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        }
+    }
+
+    #[test]
+    fn canonicalizes_unique_unqualified_column_names() {
+        assert_eq!(canonicalize_column_name(&qualified_schema(), "country").unwrap(), "events.country");
+    }
+
+    #[test]
+    fn rejects_ambiguous_column_names() {
+        let schema = TableSchema {
+            columns: vec![
+                ColumnSchema { name: "left.id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "right.id".into(), column_type: ColumnType::U32, nullable: false },
+            ],
+        };
+
+        assert!(canonicalize_column_name(&schema, "id").is_err());
+    }
+
+    #[test]
+    fn derives_scan_projection_from_required_prefixed_columns() {
+        let schema = TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "country".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        };
+        let required = BTreeSet::from(["events.country".to_string()]);
+
+        assert_eq!(derive_scan_projection("events", &schema, &required), Some(vec!["country".into()]));
+    }
+}
+

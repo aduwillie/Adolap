@@ -16,6 +16,7 @@ pub async fn ensure_dir(path: &Path) -> Result<(), AdolapError> {
 #[cfg(test)]
 mod tests {
   use super::ensure_dir;
+  use tokio::runtime::Runtime;
   use std::{time::{SystemTime, UNIX_EPOCH}};
 
   fn unique_test_dir() -> std::path::PathBuf {
@@ -27,28 +28,32 @@ mod tests {
     std::env::temp_dir().join(format!("adolap-core-util-{unique}"))
   }
 
-  #[tokio::test]
-  async fn ensure_dir_creates_missing_directory() {
-    let dir = unique_test_dir();
+  #[test]
+  fn ensure_dir_creates_missing_directory() {
+    Runtime::new().unwrap().block_on(async {
+      let dir = unique_test_dir();
 
-    ensure_dir(&dir).await.unwrap();
+      ensure_dir(&dir).await.unwrap();
 
-    let metadata = tokio::fs::metadata(&dir).await.unwrap();
-    assert!(metadata.is_dir());
+      let metadata = tokio::fs::metadata(&dir).await.unwrap();
+      assert!(metadata.is_dir());
 
-    tokio::fs::remove_dir_all(&dir).await.unwrap();
+      tokio::fs::remove_dir_all(&dir).await.unwrap();
+    });
   }
 
-  #[tokio::test]
-  async fn ensure_dir_is_idempotent_for_existing_directory() {
-    let dir = unique_test_dir();
+  #[test]
+  fn ensure_dir_is_idempotent_for_existing_directory() {
+    Runtime::new().unwrap().block_on(async {
+      let dir = unique_test_dir();
 
-    ensure_dir(&dir).await.unwrap();
-    ensure_dir(&dir).await.unwrap();
+      ensure_dir(&dir).await.unwrap();
+      ensure_dir(&dir).await.unwrap();
 
-    let metadata = tokio::fs::metadata(&dir).await.unwrap();
-    assert!(metadata.is_dir());
+      let metadata = tokio::fs::metadata(&dir).await.unwrap();
+      assert!(metadata.is_dir());
 
-    tokio::fs::remove_dir_all(&dir).await.unwrap();
+      tokio::fs::remove_dir_all(&dir).await.unwrap();
+    });
   }
 }

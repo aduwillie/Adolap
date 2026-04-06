@@ -210,6 +210,127 @@ pub fn execute<'b>(
 
 This may look slightly heavy because of boxed async recursion, but it keeps the executor implementation direct and readable.
 
+## The execution layer in practice
+
+It helps to separate the execution layer from the parser and planner mentally.
+
+- The parser answers: what did the user ask for?
+- The planner answers: what operators should run?
+- The execution layer answers: how do we turn those operators into `RecordBatch` output?
+
+In this repository the execution layer is centered on:
+
+- `crates/exec/src/executor.rs`
+- `crates/exec/src/filter.rs`
+- `crates/exec/src/projection.rs`
+- `crates/exec/src/aggregate.rs`
+- `crates/exec/src/group_by.rs`
+- `crates/exec/src/query_engine.rs`
+
+That split matters because it keeps planning decisions separate from row materialization and operator behavior.
+
+### What the executor actually does
+
+For each physical operator, the executor either:
+
+- asks storage for batches
+- transforms existing batches
+- combines batches into a new batch
+
+The current operator behavior is:
+
+- `Scan`: open the table through `TableReader`, push down projection and segment predicates when available, and return batches from storage
+- `Filter`: evaluate a boolean mask and keep matching rows only
+- `Project`: keep only the requested columns
+- `HashAggregate`: compute global or grouped aggregates and materialize them back as a `RecordBatch`
+- `GroupFilter`: apply a post-aggregation predicate
+- `HashJoin`: materialize rows from both sides, build a hash map for the right side, and emit joined rows
+- `Sort`: materialize rows, sort them in memory, and rebuild a batch
+- `Limit`: materialize rows, apply offset and limit, and rebuild a batch
+
+That is intentionally simple. Adolap is not pretending to be a distributed vectorized engine. It is showing the core operator shapes cleanly.
+
+### Execution data model
+
+The execution layer uses `RecordBatch` as its in-memory exchange type.
+
+That means every operator can assume:
+
+- a schema is attached to the batch
+- values are stored column-wise
+- nullability is preserved through validity bitmaps
+
+That is why filter, projection, grouping, and result materialization all compose cleanly. They speak the same intermediate format.
+
+### Query execution pipeline end to end
+
+When the server executes a query, the path is:
+
+1. parse text into a `LogicalPlan`
+2. optimize the logical plan
+3. bind the plan against the catalog and schemas
+4. create a `PhysicalPlan`
+5. execute the physical plan into batches
+6. convert batches into a wire `ResultSet`
+7. attach compact plan strings and execution summary metadata to the response
+
+That last step is important for consumers of the CLI and protocol. The server is responsible for producing the plan display strings and the server-side execution metrics, not the client.
+
+## Compact plan display
+
+Earlier plan output used the Rust debug view of the plan trees, which exposed braces and internal struct layout. That was useful for debugging but poor for users and client tools.
+
+The server now formats both plans into compact arrow-based chains.
+
+Example logical plan:
+
+```text
+Scan(analytics.events) -> Filter(revenue > 50) -> Project(country, revenue) -> Sort(revenue DESC) -> Limit(limit=3, offset=0)
+```
+
+Example physical plan:
+
+```text
+Scan(table=analytics.events, projection=[country, revenue], predicate=revenue > 50) -> Sort(revenue DESC) -> Limit(limit=3, offset=0)
+```
+
+For joins, the join node keeps both branches inline instead of printing nested debug structs.
+
+Example:
+
+```text
+HashJoin(on=events.user_id = users.id, left=[Scan(events)], right=[Scan(users)]) -> Project(events.country, users.plan)
+```
+
+The point is not to losslessly serialize the plan tree. The point is to make the execution path easy to read quickly.
+
+## Query result sections and execution summary
+
+The CLI now renders query execution output in clearly separated sections so users and client tools can distinguish planning details from tabular results.
+
+The sections are:
+
+- `Query Summary`
+- `Logical Plan`
+- `Physical Plan`
+- `Query Results`
+
+The summary includes server-generated execution metrics such as:
+
+- row count
+- column count
+- batch count
+- server execution time in milliseconds
+
+When CLI timing or profile output is enabled, the summary also includes client-visible transport metrics such as round-trip time and response size.
+
+That separation is deliberate:
+
+- server metrics describe how long planning and execution took inside Adolap
+- client metrics describe how long the full request-response cycle took over the wire
+
+This makes the output more useful for both human inspection and future client integrations.
+
 ## Predicate evaluation
 
 The current predicate system supports a useful but intentionally bounded set of boolean expressions. The `Expr` enum contains column references, literals, aggregate references, comparison nodes, and boolean conjunctions.
@@ -245,6 +366,8 @@ let batches = executor.execute(&physical).await?;
 ```
 
 That is the central path to keep in mind when reading the engine.
+
+After execution, the server also formats the logical and physical plans into compact display strings and attaches a query summary before returning the final protocol message to the CLI.
 
 ## Example query and what happens
 

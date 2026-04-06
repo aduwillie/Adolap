@@ -125,3 +125,58 @@ fn key_value(column: &storage::column::ColumnInputOwned, row: usize) -> String {
         ColumnValuesOwned::Bool(values) => values[row].to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::group_by_multi_key;
+    use crate::aggregate::{AggFunc, AggResult};
+    use storage::{
+        column::ColumnValue,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    fn sample_batch() -> RecordBatch {
+        RecordBatch::from_rows(
+            TableSchema {
+                columns: vec![
+                    ColumnSchema {
+                        name: "country".into(),
+                        column_type: ColumnType::Utf8,
+                        nullable: true,
+                    },
+                    ColumnSchema {
+                        name: "value".into(),
+                        column_type: ColumnType::I32,
+                        nullable: true,
+                    },
+                ],
+            },
+            &[
+                vec![Some(ColumnValue::Utf8("US".into())), Some(ColumnValue::I32(1))],
+                vec![None, Some(ColumnValue::I32(2))],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn groups_rows_with_null_keys() {
+        let result = group_by_multi_key(&sample_batch(), &["country"], "value", AggFunc::Sum).unwrap();
+        let mut grouped = result
+            .keys
+            .into_iter()
+            .zip(result.aggregates)
+            .map(|(key, aggregate)| (key.values, aggregate))
+            .collect::<Vec<_>>();
+        grouped.sort_by(|left, right| left.0.cmp(&right.0));
+
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].0, vec!["NULL"]);
+        assert_eq!(grouped[1].0, vec!["US"]);
+        match grouped[0].1 {
+            AggResult::I64(value) => assert_eq!(value, 2),
+            ref other => panic!("unexpected aggregate result: {:?}", other),
+        }
+    }
+}

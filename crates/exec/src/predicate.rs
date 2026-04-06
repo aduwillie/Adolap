@@ -138,3 +138,48 @@ pub fn col(name: &str) -> Expr {
 pub fn lit_i32(v: i32) -> Expr {
     Expr::Literal(Literal::I32(v))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{col, lit_i32};
+    use storage::{
+        column::ColumnValue,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    fn sample_batch() -> RecordBatch {
+        RecordBatch::from_rows(
+            TableSchema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    column_type: ColumnType::I32,
+                    nullable: true,
+                }],
+            },
+            &[
+                vec![Some(ColumnValue::I32(5))],
+                vec![None],
+                vec![Some(ColumnValue::I32(15))],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn evaluates_comparison_and_boolean_masks() {
+        let batch = sample_batch();
+
+        let gt_mask = col("value").gt(lit_i32(10)).evaluate_to_bool_mask(&batch).unwrap();
+        let eq_mask = col("value").eq(lit_i32(5)).evaluate_to_bool_mask(&batch).unwrap();
+        let or_mask = col("value")
+            .eq(lit_i32(5))
+            .or(col("value").gt(lit_i32(10)))
+            .evaluate_to_bool_mask(&batch)
+            .unwrap();
+
+        assert_eq!(gt_mask, vec![false, false, true]);
+        assert_eq!(eq_mask, vec![true, false, false]);
+        assert_eq!(or_mask, vec![true, false, true]);
+    }
+}

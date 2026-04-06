@@ -377,3 +377,116 @@ fn format_value(value: &ColumnValue) -> String {
         ColumnValue::Bool(value) => value.to_string(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_limit, hash_join_batches, materialize_global_aggregate, sort_batches};
+    use crate::{aggregate::AggFunc, logical_plan::{OrderBy, OrderDirection}, predicate::col};
+    use storage::{
+        catalog::TableMetadata,
+        column::ColumnValue,
+        config::TableStorageConfig,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+    use std::path::PathBuf;
+
+    fn values_schema() -> TableSchema {
+        TableSchema {
+            columns: vec![ColumnSchema {
+                name: "value".into(),
+                column_type: ColumnType::I32,
+                nullable: false,
+            }],
+        }
+    }
+
+    fn batch(values: &[i32]) -> RecordBatch {
+        RecordBatch::from_rows(
+            values_schema(),
+            &values
+                .iter()
+                .map(|value| vec![Some(ColumnValue::I32(*value))])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn apply_limit_merges_batches_with_offset() {
+        let limited = apply_limit(vec![batch(&[1, 2]), batch(&[3])], Some(1), 1).unwrap();
+
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].to_rows().unwrap(), vec![vec![Some(ColumnValue::I32(2))]]);
+    }
+
+    #[test]
+    fn materializes_and_sorts_aggregates() {
+        let aggregate = materialize_global_aggregate(&[batch(&[2, 4])], "value", &AggFunc::Sum).unwrap();
+        assert_eq!(aggregate.to_rows().unwrap(), vec![vec![Some(ColumnValue::I32(6))]]);
+
+        let sorted = sort_batches(
+            vec![batch(&[2, 1, 3])],
+            &[OrderBy {
+                expr: col("value"),
+                direction: OrderDirection::Desc,
+            }],
+        )
+        .unwrap();
+        assert_eq!(sorted[0].to_rows().unwrap(), vec![
+            vec![Some(ColumnValue::I32(3))],
+            vec![Some(ColumnValue::I32(2))],
+            vec![Some(ColumnValue::I32(1))],
+        ]);
+    }
+
+    #[test]
+    fn hash_join_batches_matches_rows_on_join_key() {
+        let left_schema = TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "left_name".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        };
+        let right_schema = TableSchema {
+            columns: vec![
+                ColumnSchema { name: "id".into(), column_type: ColumnType::U32, nullable: false },
+                ColumnSchema { name: "right_name".into(), column_type: ColumnType::Utf8, nullable: false },
+            ],
+        };
+        let left = RecordBatch::from_rows(
+            left_schema.clone(),
+            &[vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("left".into()))]],
+        )
+        .unwrap();
+        let right = RecordBatch::from_rows(
+            right_schema.clone(),
+            &[vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("right".into()))]],
+        )
+        .unwrap();
+        let output_schema = TableSchema {
+            columns: left_schema.columns.into_iter().chain(right_schema.columns).collect(),
+        };
+
+        let joined = hash_join_batches(&[left], &[right], "id", "id", &output_schema).unwrap();
+        assert_eq!(joined[0].to_rows().unwrap(), vec![vec![
+            Some(ColumnValue::U32(1)),
+            Some(ColumnValue::Utf8("left".into())),
+            Some(ColumnValue::U32(1)),
+            Some(ColumnValue::Utf8("right".into())),
+        ]]);
+    }
+
+    #[test]
+    fn sample_table_metadata_is_constructible() {
+        let table = TableMetadata {
+            database: "default".into(),
+            name: "events".into(),
+            path: PathBuf::from("data/default/events"),
+            schema: values_schema(),
+            storage_config: TableStorageConfig::default(),
+        };
+
+        assert_eq!(table.fqn(), "default.events");
+    }
+}

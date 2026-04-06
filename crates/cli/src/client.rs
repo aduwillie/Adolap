@@ -69,3 +69,42 @@ fn resolve_addr() -> String {
         .or_else(|| env::var("ADOLAP_ADDR").ok())
         .unwrap_or_else(|| DEFAULT_ADDR.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::client_message_kind;
+    use protocol::{ClientMessage, ColumnDefinition, ColumnType, ScalarValue};
+
+    #[test]
+    fn classifies_every_client_message_variant() {
+        assert_eq!(client_message_kind(&ClientMessage::QueryText("FROM events".into())), "query_text");
+        assert_eq!(client_message_kind(&ClientMessage::CreateDatabase { name: "analytics".into() }), "create_database");
+        assert_eq!(
+            client_message_kind(&ClientMessage::CreateTable {
+                table: "analytics.events".into(),
+                columns: vec![ColumnDefinition {
+                    name: "id".into(),
+                    column_type: ColumnType::U32,
+                    nullable: false,
+                }],
+            }),
+            "create_table"
+        );
+        assert_eq!(
+            client_message_kind(&ClientMessage::InsertRows {
+                table: Some("analytics.events".into()),
+                rows: vec![vec![ScalarValue::U32(1)]],
+            }),
+            "insert_rows"
+        );
+        assert_eq!(
+            client_message_kind(&ClientMessage::IngestInto {
+                table: "analytics.events".into(),
+                file_path: "rows.json".into(),
+            }),
+            "ingest_into"
+        );
+        assert_eq!(client_message_kind(&ClientMessage::MetaCommand("tables".into())), "meta_command");
+        assert_eq!(client_message_kind(&ClientMessage::Ping), "ping");
+    }
+}

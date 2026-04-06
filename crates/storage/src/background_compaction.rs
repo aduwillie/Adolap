@@ -10,7 +10,6 @@ use tracing::{debug, info, warn};
 
 const SCHEDULER_POLL_INTERVAL_SECONDS: u64 = 5;
 
-#[derive(Clone)]
 pub struct BackgroundCompactionScheduler {
     data_root: PathBuf,
     last_attempts: Arc<Mutex<HashMap<PathBuf, Instant>>>,

@@ -17,3 +17,11 @@ async fn main() {
         eprintln!("Server error: {}", e);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn main_entrypoint_is_linked() {
+        let _entrypoint: fn() = super::main;
+    }
+}

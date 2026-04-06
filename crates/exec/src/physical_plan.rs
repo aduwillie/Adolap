@@ -45,3 +45,61 @@ pub enum PhysicalPlan<'a> {
         offset: usize,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PhysicalPlan;
+    use crate::aggregate::AggFunc;
+    use storage::{
+        catalog::TableMetadata,
+        column::ColumnValue,
+        config::TableStorageConfig,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+        segment_reader::Predicate,
+    };
+    use std::path::PathBuf;
+
+    fn sample_table() -> TableMetadata {
+        TableMetadata {
+            database: "default".into(),
+            name: "events".into(),
+            path: PathBuf::from("data/default/events"),
+            schema: TableSchema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    column_type: ColumnType::I32,
+                    nullable: false,
+                }],
+            },
+            storage_config: TableStorageConfig::default(),
+        }
+    }
+
+    #[test]
+    fn constructs_nested_scan_and_limit_plan() {
+        let table = sample_table();
+        let plan = PhysicalPlan::Limit {
+            input: Box::new(PhysicalPlan::HashAggregate {
+                input: Box::new(PhysicalPlan::Scan {
+                    table: &table,
+                    projected_columns: Some(vec!["value".into()]),
+                    predicate: Some(Predicate::GreaterThan("value".into(), ColumnValue::I32(10))),
+                }),
+                group_keys: Vec::new(),
+                agg_column: "value".into(),
+                agg_func: AggFunc::Sum,
+            }),
+            limit: Some(1),
+            offset: 2,
+        };
+
+        match plan {
+            PhysicalPlan::Limit { input, limit, offset } => {
+                assert_eq!(limit, Some(1));
+                assert_eq!(offset, 2);
+                assert!(matches!(*input, PhysicalPlan::HashAggregate { .. }));
+            }
+            other => panic!("unexpected plan: {:?}", other),
+        }
+    }
+}

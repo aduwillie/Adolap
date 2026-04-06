@@ -56,3 +56,38 @@ async fn handle_connection(mut socket: TcpStream) -> Result<(), AdolapError> {
         write_frame(&mut socket, &bytes).await?;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::handle_connection;
+    use protocol::{decode_server_message, encode_client_message, ClientMessage, ServerMessage};
+    use protocol::framing::{read_frame, write_frame};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::runtime::Runtime;
+
+    #[test]
+    fn handle_connection_round_trips_ping() {
+        Runtime::new().unwrap().block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let server_task = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                handle_connection(socket).await.unwrap();
+            });
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let request = encode_client_message(&ClientMessage::Ping);
+            write_frame(&mut client, &request).await.unwrap();
+
+            let response = read_frame(&mut client).await.unwrap();
+            match decode_server_message(&response).unwrap() {
+                ServerMessage::Pong => {}
+                other => panic!("unexpected response: {:?}", other),
+            }
+
+            drop(client);
+            server_task.await.unwrap();
+        });
+    }
+}

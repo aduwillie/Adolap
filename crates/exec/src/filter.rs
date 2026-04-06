@@ -86,3 +86,45 @@ fn rebuild_validity(validity: Option<&[u8]>, mask: &[bool]) -> Option<Vec<u8>> {
         kept
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::filter;
+    use storage::{
+        column::ColumnValue,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    fn sample_batch() -> RecordBatch {
+        RecordBatch::from_rows(
+            TableSchema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    column_type: ColumnType::I32,
+                    nullable: true,
+                }],
+            },
+            &[
+                vec![Some(ColumnValue::I32(1))],
+                vec![None],
+                vec![Some(ColumnValue::I32(3))],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn filters_rows_and_rebuilds_validity() {
+        let filtered = filter(&sample_batch(), &[false, true, true]).unwrap();
+        let rows = filtered.to_rows().unwrap();
+
+        assert_eq!(filtered.row_count, 2);
+        assert_eq!(rows, vec![vec![None], vec![Some(ColumnValue::I32(3))]]);
+    }
+
+    #[test]
+    fn rejects_wrong_mask_length() {
+        assert!(filter(&sample_batch(), &[true]).is_err());
+    }
+}

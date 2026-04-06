@@ -38,3 +38,61 @@ pub fn global_group_by_multi_key(
 
     Ok(GroupByResult { keys, aggregates: aggs })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::global_group_by_multi_key;
+    use crate::aggregate::{AggFunc, AggResult};
+    use storage::{
+        column::ColumnValue,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    fn batch(rows: &[(Option<&str>, Option<i32>)]) -> RecordBatch {
+        RecordBatch::from_rows(
+            TableSchema {
+                columns: vec![
+                    ColumnSchema {
+                        name: "country".into(),
+                        column_type: ColumnType::Utf8,
+                        nullable: true,
+                    },
+                    ColumnSchema {
+                        name: "value".into(),
+                        column_type: ColumnType::I32,
+                        nullable: true,
+                    },
+                ],
+            },
+            &rows
+                .iter()
+                .map(|(country, value)| {
+                    vec![
+                        country.map(|value| ColumnValue::Utf8(value.into())),
+                        value.map(ColumnValue::I32),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn merges_grouped_results_from_multiple_batches() {
+        let result = global_group_by_multi_key(
+            &[batch(&[(Some("US"), Some(1))]), batch(&[(Some("US"), Some(2))])],
+            &["country"],
+            "value",
+            AggFunc::Sum,
+        )
+        .unwrap();
+
+        assert_eq!(result.keys.len(), 1);
+        assert_eq!(result.keys[0].values, vec!["US"]);
+        match result.aggregates[0] {
+            AggResult::I64(value) => assert_eq!(value, 3),
+            ref other => panic!("unexpected aggregate result: {:?}", other),
+        }
+    }
+}

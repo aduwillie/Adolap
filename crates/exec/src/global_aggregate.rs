@@ -28,3 +28,39 @@ pub fn global_aggregate(
 
     state.to_result(&func)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::global_aggregate;
+    use crate::aggregate::{AggFunc, AggResult};
+    use storage::{
+        column::ColumnValue,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    fn batch(values: &[Option<i32>]) -> RecordBatch {
+        RecordBatch::from_rows(
+            TableSchema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    column_type: ColumnType::I32,
+                    nullable: true,
+                }],
+            },
+            &values
+                .iter()
+                .map(|value| vec![value.map(ColumnValue::I32)])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn aggregates_across_batches() {
+        match global_aggregate(&[batch(&[Some(1), None]), batch(&[Some(3)])], "value", AggFunc::Sum).unwrap() {
+            AggResult::I64(value) => assert_eq!(value, 4),
+            other => panic!("unexpected aggregate result: {:?}", other),
+        }
+    }
+}

@@ -123,3 +123,56 @@ pub fn agg_output_name(func: &AggFunc, col: &str) -> String {
     format!("{}_{}", prefix, col)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{agg_output_name, aggregate_column_state, AggFunc, AggResult, AggState};
+    use storage::{
+        column::ColumnValue,
+        record_batch::RecordBatch,
+        schema::{ColumnSchema, ColumnType, TableSchema},
+    };
+
+    fn sample_batch() -> RecordBatch {
+        RecordBatch::from_rows(
+            TableSchema {
+                columns: vec![ColumnSchema {
+                    name: "value".into(),
+                    column_type: ColumnType::I32,
+                    nullable: true,
+                }],
+            },
+            &[
+                vec![Some(ColumnValue::I32(1))],
+                vec![None],
+                vec![Some(ColumnValue::I32(2))],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn aggregates_numeric_column_state_while_skipping_nulls() {
+        let state = aggregate_column_state(&sample_batch(), "value").unwrap();
+
+        assert_eq!(state.sum, 3);
+        assert_eq!(state.count, 2);
+        assert_eq!(state.min, Some(1));
+        assert_eq!(state.max, Some(2));
+        assert_eq!(agg_output_name(&AggFunc::Sum, "value"), "sum_value");
+    }
+
+    #[test]
+    fn to_result_handles_average_and_empty_min() {
+        let mut state = AggState::default();
+        state.update_i64(2);
+        state.update_i64(4);
+
+        match state.to_result(&AggFunc::Avg).unwrap() {
+            AggResult::F64(value) => assert!((value - 3.0).abs() < f64::EPSILON),
+            other => panic!("unexpected aggregate result: {:?}", other),
+        }
+
+        assert!(AggState::default().to_result(&AggFunc::Min).is_err());
+    }
+}
+
