@@ -69,7 +69,9 @@ fn bench_bloom_might_contain_negative(c: &mut Criterion) {
             let mut found = 0usize;
             // Query values that were never inserted — should all return false
             // (with high probability for a well-sized filter).
-            for i in (n as i32)..(n as i32 * 2) {
+            let start = n as i32;
+            let end = start * 2;
+            for i in start..end {
                 if bloom.might_contain(&i) {
                     found += 1;
                 }

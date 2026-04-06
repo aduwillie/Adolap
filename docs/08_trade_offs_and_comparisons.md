@@ -40,29 +40,33 @@ The smallest unit the engine can skip during a scan is a row group (default: 16,
 
 **Cost:** For selective equality queries on high-cardinality columns, the engine may still read thousands of rows it will immediately discard once the actual column data is loaded. A secondary index (B-tree, inverted) would allow row-level skipping but adds significant write-path complexity.
 
-### 1.4 Fixed-size bloom filters
+### 1.4 Fixed-size bloom filters (resolved in this codebase)
 
-**Decision** (`crates/storage/src/bloom.rs:11`)
+**Previous behaviour** (`crates/storage/src/bloom.rs`, prior to `fix: size bloom filter dynamically`)
 
-Every bloom filter is exactly 2,048 bits (256 bytes) regardless of how many distinct values the column contains. With three hash functions, the theoretical false-positive rate for `n` inserted values is approximately:
+Every bloom filter was a hard-coded 2,048-bit (256-byte) array regardless of column cardinality. With three hash functions the false-positive rate for `n` inserted values was:
 
 ```
 fpp ≈ (1 - e^(-3n/2048))^3
 ```
 
-For a row group of 16,384 rows with a column that has 1,000 distinct values, the false-positive rate is about 1%. For 10,000 distinct values it exceeds 95%, at which point the bloom filter provides almost no benefit and just wastes the I/O required to read and deserialize it.
+For a row group of 16,384 rows with 10,000+ distinct values the rate exceeded 95%, making the filter useless.
 
-**Cost:** Bloom filters are unhelpful for high-cardinality columns at the default row group size.
+**Current behaviour**
 
-### 1.5 Result set limited to the first record batch
+`BloomFilter::with_capacity(n)` sizes the bit array using the standard formula `m = -(n * ln(fpp)) / (ln(2))^2`, clamped to [512 bits, 32,768 bits]. The non-null count of each column is passed as `expected_distinct` at write time, so high-cardinality columns get proportionally larger filters.
 
-**Decision** (`crates/server/src/handler.rs:403`)
+**Remaining cost:** The `expected_distinct` hint equals the actual value count, not the number of distinct values. A column with 16,384 rows but only 10 distinct values will still allocate a large filter. Using the `distinct_count` from `ColumnStats` would produce a tighter size estimate.
 
-`convert_batches_to_resultset` currently materializes only `batches[0]` into the wire `ResultSet`. If the executor returns multiple batches (which it does when a table spans multiple row groups), the rows from all batches beyond the first are silently discarded.
+### 1.5 Result set limited to the first record batch (resolved in this codebase)
 
-This is the most impactful correctness gap in the current implementation. It is acknowledged in `docs/architecture.md:95`.
+**Previous behaviour** (`crates/server/src/handler.rs`, prior to `fix: iterate all batches`)
 
-**Cost:** Queries against tables with more than one row group return incomplete results with no error or warning.
+`convert_batches_to_resultset` materialised only `batches[0]` into the wire `ResultSet`. Tables spanning multiple row groups silently returned incomplete results.
+
+**Current behaviour**
+
+The function now iterates every batch in the vector and collects column names from the first batch (all share the same schema). A table with one million rows spread across 61 row groups (16,384 rows each) returns all rows correctly.
 
 ### 1.6 No WAL, no crash recovery
 
@@ -184,19 +188,19 @@ The risks below are ordered by impact. Each entry names the relevant file, descr
 
 ### Risk 1 — Multi-batch result truncation (correctness, high impact)
 
-**File:** `crates/server/src/handler.rs:403`
+**File:** `crates/server/src/handler.rs`
 
-`convert_batches_to_resultset` processes only `batches[0]`. Any table that spans more than one row group silently returns partial results.
+`convert_batches_to_resultset` previously processed only `batches[0]`. Any table spanning more than one row group silently returned partial results.
 
-**Fix:** Iterate all batches in the vector; collect column names from the first batch; collect rows from every batch.
+**Status: resolved** — `fix: iterate all batches in convert_batches_to_resultset` now loops over every batch. Tests in `handler::tests` cover the multi-batch case.
 
 ### Risk 2 — Non-atomic `replace_rows` (data loss, high impact)
 
-**File:** `crates/storage/src/table_writer.rs:96-100`
+**File:** `crates/storage/src/table_writer.rs`
 
-`replace_rows` calls `clear_data()` and then `insert_rows()`. A crash between the two calls leaves the table empty. There is no backup or recovery path.
+`replace_rows` previously called `clear_data()` then `insert_rows()`. A crash between the two calls left the table empty.
 
-**Fix:** Write new segments to a temporary directory under the table root; on success, rename old segment directories to a backup path and rename the temp directories into place; remove the backup. The rename operations should be as close to atomic as the OS permits.
+**Status: resolved** — `fix: make replace_rows atomic via staging-dir + rename` writes new segments to `.replace_staging_<ts>`, renames live segments to `.replace_backup_<ts>`, moves staged segments in, and then removes the backup. Tests verify no leftover staging or backup directories remain.
 
 ### Risk 3 — No write-ahead log (data loss, high impact)
 
@@ -206,13 +210,13 @@ A crash during any write leaves a partial segment directory. `next_segment_id` s
 
 **Fix:** Before writing a segment, append a WAL entry recording the intent. On startup, scan the WAL for incomplete entries and either replay or roll back the incomplete segment directory.
 
-### Risk 4 — Fixed bloom filter size at high cardinality (correctness, medium impact)
+### Risk 4 — Fixed bloom filter size at high cardinality (medium impact)
 
-**File:** `crates/storage/src/bloom.rs:11`
+**File:** `crates/storage/src/bloom.rs`
 
-At 16,384 rows per row group with 10,000 or more distinct values, the 2,048-bit bloom filter has a false-positive rate above 95%. The filter then burns I/O reading and deserializing a useless structure.
+At 16,384 rows per row group with 10,000+ distinct values, the old 2,048-bit bloom filter had a false-positive rate above 95%.
 
-**Fix:** Size the filter using the formula `m = -(n * ln(fpp)) / (ln(2))^2` where `n` is the expected number of distinct values (available from `distinct_count` in `ColumnStats`) and `fpp` is a configurable target false-positive probability. Store the actual bit count in the bloom file header so the reader can reconstruct the filter correctly.
+**Status: resolved** — `fix: size bloom filter dynamically` applies `m = -(n * ln(fpp)) / (ln(2))^2` at write time. The bit count is stored in the serialised form (via `serde` derive on `Vec<u8>`) so readers reconstruct the filter at any size.
 
 ### Risk 5 — In-memory aggregation with no spill (availability, medium impact)
 
@@ -240,25 +244,22 @@ The server binds a plain TCP socket with no authentication, no TLS, and no acces
 
 ### Risk 8 — No connection limit (availability, low impact)
 
-**File:** `crates/server/src/tcp.rs:20`
+**File:** `crates/server/src/tcp.rs`
 
-The server spawns one Tokio task per accepted connection with no upper bound. A client that opens thousands of connections exhausts the OS file descriptor table and available memory.
+The server previously spawned one Tokio task per accepted connection with no upper bound.
 
-**Fix:** Track the current connection count with an `AtomicUsize`. Reject new connections when the count exceeds a configurable `max_connections` value in `ServerConfig`.
+**Status: resolved** — `fix: add per-server connection limit` adds `max_connections: usize` (default 256) to `ServerConfig` and tracks live connections with an `AtomicUsize` in `start_server_with_limit`. Connections beyond the limit are dropped immediately after OS-level accept.
 
 ---
 
 ## Section 4: Suggested next steps
 
-If the goal is to make Adolap more than a learning project, the following work items address the highest-priority gaps in order:
+The following items remain open after the fixes in this PR, ordered by impact:
 
-1. Fix the multi-batch result truncation (one function change, no new dependencies).
-2. Make `replace_rows` atomic using temp-dir and rename.
-3. Add a write-ahead log before each segment write.
-4. Size bloom filters dynamically from column stats.
-5. Add `F64` and `TimestampMs` to the type system.
-6. Add a spill path to the hash aggregate operator.
-7. Add TLS and basic authentication to the server.
-8. Add connection limits to the TCP listener.
+1. Add a write-ahead log before each segment write (Risk 3 above).
+2. Add `F64` and `TimestampMs` to the type system (Risk 6).
+3. Add a spill path to the hash aggregate operator (Risk 5).
+4. Add TLS and basic authentication to the server (Risk 7).
+5. Use `distinct_count` from `ColumnStats` as the bloom filter cardinality hint instead of the raw value count.
 
-Steps 1 and 2 are correctness fixes with very small implementation footprints. Steps 3 through 8 each require more design work but follow patterns already established in the codebase.
+Each item requires moderate design work but follows patterns already established in the codebase.

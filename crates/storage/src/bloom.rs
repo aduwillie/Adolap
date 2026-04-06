@@ -9,7 +9,7 @@ use crate::null::is_null;
 /// Minimum bloom filter size: 64 bytes (512 bits).
 const MIN_BLOOM_BYTES: usize = 64;
 
-/// Maximum bloom filter size: 4096 bytes (32 768 bits).
+/// Maximum bloom filter size: 4096 bytes (32_768 bits).
 /// Larger sizes are not useful for single row-group column chunks.
 const MAX_BLOOM_BYTES: usize = 4096;
 
