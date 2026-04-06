@@ -400,9 +400,8 @@ fn convert_batches_to_resultset(
         return Ok(ResultSet::new(vec![], vec![]));
     }
 
-    let batch = &batches[0];
-
-    let columns = batch
+    // Derive column names from the first batch; all batches share the same schema.
+    let columns = batches[0]
         .schema
         .columns
         .iter()
@@ -411,24 +410,28 @@ fn convert_batches_to_resultset(
 
     let mut rows = Vec::new();
 
-    for row_idx in 0..batch.row_count {
-        let mut values = Vec::new();
+    // Iterate every batch so that tables spanning multiple row groups return
+    // complete results instead of only the first batch.
+    for batch in &batches {
+        for row_idx in 0..batch.row_count {
+            let mut values = Vec::new();
 
-        for col in &batch.columns {
-            let v = if is_null(col.validity.as_deref(), row_idx) {
-                "NULL".to_string()
-            } else {
-                match &col.values {
-                    storage::column::ColumnValuesOwned::I32(vs) => vs[row_idx].to_string(),
-                    storage::column::ColumnValuesOwned::U32(vs) => vs[row_idx].to_string(),
-                    storage::column::ColumnValuesOwned::Bool(vs) => vs[row_idx].to_string(),
-                    storage::column::ColumnValuesOwned::Utf8(vs) => vs[row_idx].clone(),
-                }
-            };
-            values.push(v);
+            for col in &batch.columns {
+                let v = if is_null(col.validity.as_deref(), row_idx) {
+                    "NULL".to_string()
+                } else {
+                    match &col.values {
+                        storage::column::ColumnValuesOwned::I32(vs) => vs[row_idx].to_string(),
+                        storage::column::ColumnValuesOwned::U32(vs) => vs[row_idx].to_string(),
+                        storage::column::ColumnValuesOwned::Bool(vs) => vs[row_idx].to_string(),
+                        storage::column::ColumnValuesOwned::Utf8(vs) => vs[row_idx].clone(),
+                    }
+                };
+                values.push(v);
+            }
+
+            rows.push(ResultRow::new(values));
         }
-
-        rows.push(ResultRow::new(values));
     }
 
     Ok(ResultSet::new(columns, rows))
@@ -540,6 +543,82 @@ mod tests {
         assert_eq!(result_set.columns, vec!["id", "name"]);
         assert_eq!(result_set.rows.len(), 2);
         assert_eq!(result_set.rows[1].values, vec!["2", "NULL"]);
+    }
+
+    #[test]
+    fn converts_multiple_batches_to_resultset_combines_all_rows() {
+        // Batch 1: rows 1–2
+        let batch1 = RecordBatch::from_rows(
+            sample_schema(),
+            &[
+                vec![Some(ColumnValue::U32(1)), Some(ColumnValue::Utf8("alpha".into()))],
+                vec![Some(ColumnValue::U32(2)), Some(ColumnValue::Utf8("beta".into()))],
+            ],
+        )
+        .unwrap();
+
+        // Batch 2: rows 3–4
+        let batch2 = RecordBatch::from_rows(
+            sample_schema(),
+            &[
+                vec![Some(ColumnValue::U32(3)), Some(ColumnValue::Utf8("gamma".into()))],
+                vec![Some(ColumnValue::U32(4)), None],
+            ],
+        )
+        .unwrap();
+
+        let result_set = convert_batches_to_resultset(vec![batch1, batch2]).unwrap();
+
+        // All four rows must appear — the bug would have returned only rows 1–2.
+        assert_eq!(result_set.columns, vec!["id", "name"]);
+        assert_eq!(result_set.rows.len(), 4);
+        assert_eq!(result_set.rows[0].values, vec!["1", "alpha"]);
+        assert_eq!(result_set.rows[1].values, vec!["2", "beta"]);
+        assert_eq!(result_set.rows[2].values, vec!["3", "gamma"]);
+        assert_eq!(result_set.rows[3].values, vec!["4", "NULL"]);
+    }
+
+    #[test]
+    fn converts_empty_batch_list_to_empty_resultset() {
+        let result_set = convert_batches_to_resultset(vec![]).unwrap();
+        assert!(result_set.columns.is_empty());
+        assert!(result_set.rows.is_empty());
+    }
+
+    #[test]
+    fn converts_single_batch_with_all_nulls() {
+        let batch = RecordBatch::from_rows(
+            sample_schema(),
+            &[vec![Some(ColumnValue::U32(99)), None]],
+        )
+        .unwrap();
+
+        let result_set = convert_batches_to_resultset(vec![batch]).unwrap();
+        assert_eq!(result_set.rows.len(), 1);
+        assert_eq!(result_set.rows[0].values, vec!["99", "NULL"]);
+    }
+
+    #[test]
+    fn converts_three_batches_preserves_row_order() {
+        let make_batch = |id: u32, label: &str| {
+            RecordBatch::from_rows(
+                sample_schema(),
+                &[vec![Some(ColumnValue::U32(id)), Some(ColumnValue::Utf8(label.into()))]],
+            )
+            .unwrap()
+        };
+
+        let result_set = convert_batches_to_resultset(vec![
+            make_batch(10, "x"),
+            make_batch(20, "y"),
+            make_batch(30, "z"),
+        ])
+        .unwrap();
+
+        assert_eq!(result_set.rows.len(), 3);
+        assert_eq!(result_set.rows[0].values[0], "10");
+        assert_eq!(result_set.rows[1].values[0], "20");
+        assert_eq!(result_set.rows[2].values[0], "30");
     }
 
     #[test]
