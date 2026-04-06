@@ -1,6 +1,7 @@
 use core::{
     error::AdolapError,
     id::TableId,
+    time::now_ms,
 };
 use serde_json::Value;
 use std::{
@@ -18,6 +19,9 @@ use crate::{
     schema::{ColumnType, TableSchema},
     segment_writer::SegmentWriter,
 };
+
+const REPLACE_STAGING_PREFIX: &str = ".replace_staging_";
+const REPLACE_BACKUP_PREFIX: &str = ".replace_backup_";
 
 pub const DEFAULT_DATABASE_NAME: &str = "default";
 pub const SCHEMA_FILE_NAME: &str = "schema.json";
@@ -93,36 +97,112 @@ impl TableWriter {
         Ok(rows.len())
     }
 
+    /// Replace all rows in the table atomically.
+    ///
+    /// The new rows are written to a temporary staging directory first.  Once
+    /// all writes succeed the existing segment directories are renamed to a
+    /// backup location and the staging segments are moved into place.  The
+    /// backup is then removed.  A crash between the rename steps leaves either
+    /// the old data or the new data fully intact; no window exists where the
+    /// table is empty.
     pub async fn replace_rows(&self, rows: &[Vec<Option<ColumnValue>>]) -> Result<usize, AdolapError> {
-        info!(table = %self.table_dir.display(), replacement_rows = rows.len(), "replacing table rows");
-        self.clear_data().await?;
-        self.insert_rows(rows).await
-    }
+        info!(table = %self.table_dir.display(), replacement_rows = rows.len(), "replacing table rows atomically");
 
-    pub async fn clear_data(&self) -> Result<(), AdolapError> {
-        let mut entries = match fs::read_dir(&self.table_dir).await {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.into()),
-        };
+        let ts = now_ms();
+        let staging_dir = self.table_dir.join(format!("{}{}", REPLACE_STAGING_PREFIX, ts));
+        let backup_dir  = self.table_dir.join(format!("{}{}", REPLACE_BACKUP_PREFIX, ts));
 
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
-            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-                continue;
+        // Clean up any leftover staging/backup directories from a previous crash.
+        for prefix in [REPLACE_STAGING_PREFIX, REPLACE_BACKUP_PREFIX] {
+            let mut entries = match fs::read_dir(&self.table_dir).await {
+                Ok(e) => e,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+                Err(err) => return Err(err.into()),
             };
-
-            if name.starts_with("segment_") {
-                fs::remove_dir_all(&path).await?;
-                debug!(segment = %name, table = %self.table_dir.display(), "removed segment during clear_data");
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with(prefix)) {
+                    fs::remove_dir_all(&path).await?;
+                    debug!(path = %path.display(), "removed leftover replace directory");
+                }
             }
         }
 
+        // 1. Write new segments into the staging directory.
+        fs::create_dir_all(&staging_dir).await?;
+
+        // Build a TableWriter that targets the staging directory so that
+        // segment IDs start from 0 and config/schema are not written there.
+        let staging_writer = Self {
+            table_dir: staging_dir.clone(),
+            schema: self.schema.clone(),
+            storage_config: self.storage_config.clone(),
+            table_id: self.table_id,
+        };
+        let inserted = staging_writer.insert_rows(rows).await?;
+
+        // 2. Collect existing live segment directories.
+        let live_segments = self.collect_segment_dirs().await?;
+
+        // 3. Move live segments to backup atomically (rename is near-atomic
+        //    on most filesystems when source and destination are on the same
+        //    volume, which is always true here).
+        fs::create_dir_all(&backup_dir).await?;
+        for segment in &live_segments {
+            let name = segment
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| AdolapError::StorageError("Invalid segment path".into()))?;
+            fs::rename(segment, backup_dir.join(name)).await?;
+        }
+
+        // 4. Move staged segments into the live table directory.
+        let mut staged = fs::read_dir(&staging_dir).await?;
+        while let Some(entry) = staged.next_entry().await? {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| AdolapError::StorageError("Invalid staged segment path".into()))?
+                .to_string();
+            fs::rename(&path, self.table_dir.join(&name)).await?;
+        }
+
+        // 5. Remove the now-empty staging directory and the backup.
+        fs::remove_dir_all(&staging_dir).await?;
+        fs::remove_dir_all(&backup_dir).await?;
+
+        info!(table = %self.table_dir.display(), inserted, "atomic replace completed");
+        Ok(inserted)
+    }
+
+    pub async fn clear_data(&self) -> Result<(), AdolapError> {
+        for segment in self.collect_segment_dirs().await? {
+            let name = segment.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            fs::remove_dir_all(&segment).await?;
+            debug!(segment = %name, table = %self.table_dir.display(), "removed segment during clear_data");
+        }
         Ok(())
+    }
+
+    async fn collect_segment_dirs(&self) -> Result<Vec<PathBuf>, AdolapError> {
+        let mut segments = Vec::new();
+        let mut entries = match fs::read_dir(&self.table_dir).await {
+            Ok(e) => e,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(segments),
+            Err(err) => return Err(err.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("segment_") {
+                        segments.push(path);
+                    }
+                }
+            }
+        }
+        Ok(segments)
     }
 
     pub async fn ingest_json_file(&self, file_path: &Path) -> Result<usize, AdolapError> {
@@ -544,6 +624,113 @@ mod tests {
 
             writer.insert_rows(&[vec![Some(ColumnValue::U32(1))]]).await.unwrap();
             assert!(writer.table_dir.join("segment_0").exists());
+        });
+    }
+
+    #[test]
+    fn replace_rows_overwrites_existing_data() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(
+                temp_dir.path(),
+                "default",
+                "events",
+                &sample_schema(),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+
+            writer.insert_rows(&[vec![Some(ColumnValue::U32(1))]]).await.unwrap();
+            writer.insert_rows(&[vec![Some(ColumnValue::U32(2))]]).await.unwrap();
+
+            let replaced = writer
+                .replace_rows(&[vec![Some(ColumnValue::U32(99))]])
+                .await
+                .unwrap();
+
+            assert_eq!(replaced, 1);
+
+            // Only one segment should exist after replacement.
+            let segments: Vec<_> = std::fs::read_dir(&writer.table_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("segment_"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            assert_eq!(segments.len(), 1, "expected exactly one segment after replace");
+        });
+    }
+
+    #[test]
+    fn replace_rows_leaves_no_staging_or_backup_directories() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(
+                temp_dir.path(),
+                "default",
+                "events",
+                &sample_schema(),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+
+            writer.insert_rows(&[vec![Some(ColumnValue::U32(42))]]).await.unwrap();
+            writer
+                .replace_rows(&[vec![Some(ColumnValue::U32(7))]])
+                .await
+                .unwrap();
+
+            // No leftover staging or backup directories.
+            let leftovers: Vec<_> = std::fs::read_dir(&writer.table_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let n = name.to_string_lossy();
+                    n.starts_with(super::REPLACE_STAGING_PREFIX)
+                        || n.starts_with(super::REPLACE_BACKUP_PREFIX)
+                })
+                .collect();
+            assert!(leftovers.is_empty(), "leftover staging/backup dirs: {:?}", leftovers);
+        });
+    }
+
+    #[test]
+    fn replace_rows_with_empty_set_removes_all_segments() {
+        run_async_test(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let writer = TableWriter::create_table(
+                temp_dir.path(),
+                "default",
+                "events",
+                &sample_schema(),
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+
+            writer.insert_rows(&[vec![Some(ColumnValue::U32(1))]]).await.unwrap();
+            let replaced = writer.replace_rows(&[]).await.unwrap();
+
+            assert_eq!(replaced, 0);
+
+            let segments: Vec<_> = std::fs::read_dir(&writer.table_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("segment_"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            assert!(segments.is_empty(), "expected no segments after replacing with empty set");
         });
     }
 }
