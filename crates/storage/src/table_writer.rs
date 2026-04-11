@@ -108,6 +108,9 @@ impl TableWriter {
     pub async fn replace_rows(&self, rows: &[Vec<Option<ColumnValue>>]) -> Result<usize, AdolapError> {
         info!(table = %self.table_dir.display(), replacement_rows = rows.len(), "replacing table rows atomically");
 
+        // Invalidate cached segments, bloom filters, etc. for this table.
+        crate::read_cache::global_cache().invalidate_prefix(&self.table_dir);
+
         let ts = now_ms();
         let staging_dir = self.table_dir.join(format!("{}{}", REPLACE_STAGING_PREFIX, ts));
         let backup_dir  = self.table_dir.join(format!("{}{}", REPLACE_BACKUP_PREFIX, ts));
@@ -177,6 +180,9 @@ impl TableWriter {
     }
 
     pub async fn clear_data(&self) -> Result<(), AdolapError> {
+        // Invalidate cached segments, bloom filters, etc. for this table.
+        crate::read_cache::global_cache().invalidate_prefix(&self.table_dir);
+
         for segment in self.collect_segment_dirs().await? {
             let name = segment.file_name().and_then(|n| n.to_str()).unwrap_or("");
             fs::remove_dir_all(&segment).await?;

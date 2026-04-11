@@ -25,11 +25,15 @@ impl<'a> TableReader<'a> {
         let segment_reader = SegmentReader::new(self.schema, projected_columns);
 
         for segment_dir in segment_dirs {
-            // Load segment metadata (for future use: stats, debugging, etc.)
+            // Load segment metadata (cached — segments are immutable)
             let meta_path = segment_dir.join(SEGMENT_METADATA_FILE_NAME);
-            let meta_bytes = fs::read(&meta_path).await?;
-            let _segment_meta: SegmentMetadata = postcard::from_bytes(&meta_bytes)
-                .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize segment metadata: {}", e)))?;
+            let cache = crate::read_cache::global_cache();
+            if cache.get_segment_metadata(&meta_path).is_none() {
+                let meta_bytes = fs::read(&meta_path).await?;
+                let segment_meta: SegmentMetadata = postcard::from_bytes(&meta_bytes)
+                    .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize segment metadata: {}", e)))?;
+                cache.put_segment_metadata(meta_path, segment_meta);
+            }
 
             // Delegate pruning + reading to SegmentReader
             let mut segment_batches = segment_reader

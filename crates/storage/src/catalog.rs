@@ -268,6 +268,7 @@ impl Catalog {
     /// Drop a single table.
     pub async fn drop_table(&self, table_ref: &str) -> Result<TableMetadata, AdolapError> {
         let table = self.resolve_table(table_ref).await?;
+        crate::read_cache::global_cache().invalidate_prefix(&table.path);
         fs::remove_dir_all(&table.path).await?;
         Ok(table)
     }
@@ -288,6 +289,12 @@ impl Catalog {
                 "Database '{}' does not exist",
                 database
             )));
+        }
+
+        // Invalidate all cached entries under each table path.
+        let cache = crate::read_cache::global_cache();
+        for table in &tables {
+            cache.invalidate_prefix(&table.path);
         }
 
         if database == DEFAULT_DATABASE_NAME {
@@ -345,12 +352,30 @@ impl Catalog {
         name: String,
         path: PathBuf,
     ) -> Result<TableMetadata, AdolapError> {
-        let schema = TableSchema::load(&path.join(SCHEMA_FILE_NAME)).await?;
-        let storage_config = match fs::metadata(path.join(TABLE_CONFIG_FILE_NAME)).await {
-            Ok(_) => TableStorageConfig::load(&path.join(TABLE_CONFIG_FILE_NAME)).await?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => TableStorageConfig::default(),
-            Err(err) => return Err(err.into()),
+        let cache = crate::read_cache::global_cache();
+
+        let schema_path = path.join(SCHEMA_FILE_NAME);
+        let schema = if let Some(cached) = cache.get_schema(&schema_path) {
+            cached
+        } else {
+            let loaded = TableSchema::load(&schema_path).await?;
+            cache.put_schema(schema_path, loaded.clone());
+            loaded
         };
+
+        let config_path = path.join(TABLE_CONFIG_FILE_NAME);
+        let storage_config = if let Some(cached) = cache.get_config(&config_path) {
+            cached
+        } else {
+            let loaded = match fs::metadata(&config_path).await {
+                Ok(_) => TableStorageConfig::load(&config_path).await?,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => TableStorageConfig::default(),
+                Err(err) => return Err(err.into()),
+            };
+            cache.put_config(config_path, loaded.clone());
+            loaded
+        };
+
         Ok(TableMetadata {
             database,
             name,

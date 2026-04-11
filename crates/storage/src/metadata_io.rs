@@ -39,14 +39,22 @@ pub async fn write_segment_metdata(
 
 /// Read the segment metadata from disk.
 /// This will read the binary metadata file and deserialize it into a SegmentMetadata struct.
+/// Results are cached because segment metadata is immutable once written.
 pub async fn read_segment_metadata(segment_dir: &Path) -> Result<SegmentMetadata, AdolapError> {
   let binary_metadata_path = segment_dir.join(SEGMENT_METADATA_FILE_NAME);
+
+  let cache = crate::read_cache::global_cache();
+  if let Some(cached) = cache.get_segment_metadata(&binary_metadata_path) {
+      return Ok(cached);
+  }
+
   let binary_bytes = fs::read(&binary_metadata_path).await
     .map_err(|e| AdolapError::Serialization(format!("Cannot read metadata file: {}", e)))?;
 
   let metadata: SegmentMetadata = from_bytes(&binary_bytes)
     .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize metadata: {}", e)))?;
 
+  cache.put_segment_metadata(binary_metadata_path, metadata.clone());
   Ok(metadata)
 }
 

@@ -384,6 +384,9 @@ async fn write_rows_to_segment(
 }
 
 async fn replace_directory(target_dir: &Path, temp_dir: &Path) -> Result<(), AdolapError> {
+    // Invalidate cached metadata for the segment being replaced.
+    crate::read_cache::global_cache().invalidate_prefix(target_dir);
+
     let parent = target_dir
         .parent()
         .ok_or_else(|| AdolapError::StorageError("Segment directory has no parent".into()))?;
@@ -408,6 +411,12 @@ async fn replace_table_segments(
     old_segments: Vec<PathBuf>,
     temp_root: &Path,
 ) -> Result<(), AdolapError> {
+    // Invalidate cached metadata for all segments being replaced.
+    let cache = crate::read_cache::global_cache();
+    for segment in &old_segments {
+        cache.invalidate_prefix(segment);
+    }
+
     let backup_root = table_dir.join(format!("{}{}", COMPACTION_BACKUP_PREFIX, now_ms()));
     fs::create_dir_all(&backup_root).await?;
 
