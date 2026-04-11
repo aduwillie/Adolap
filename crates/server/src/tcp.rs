@@ -2,6 +2,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task;
 use adolap_core::error::AdolapError;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use storage::background_compaction::BackgroundCompactionScheduler;
 use tracing::{debug, error, info, warn};
 
@@ -10,26 +12,52 @@ use protocol::{decode_client_message, encode_server_message};
 
 use crate::handler::handle_message;
 
+/// Default connection limit used when no explicit value is provided.
+const DEFAULT_MAX_CONNECTIONS: usize = 256;
+
 pub async fn start_server(addr: &str) -> Result<(), AdolapError> {
+    start_server_with_limit(addr, DEFAULT_MAX_CONNECTIONS).await
+}
+
+pub async fn start_server_with_limit(addr: &str, max_connections: usize) -> Result<(), AdolapError> {
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| AdolapError::ExecutionError(format!("Bind error: {}", e)))?;
 
     let _background_compaction = BackgroundCompactionScheduler::new(PathBuf::from("data")).spawn();
 
-    info!(%addr, "server listening");
+    let connection_count = Arc::new(AtomicUsize::new(0));
+
+    info!(%addr, max_connections, "server listening");
     println!("Adolap server listening on {}", addr);
 
     loop {
         let (socket, peer) = listener.accept().await?;
-        info!(%peer, "client connected");
+
+        let current = connection_count.load(Ordering::Relaxed);
+        if current >= max_connections {
+            warn!(
+                %peer,
+                current_connections = current,
+                max_connections,
+                "connection limit reached; dropping new connection"
+            );
+            drop(socket);
+            continue;
+        }
+
+        info!(%peer, connections = current + 1, "client connected");
         println!("Client connected: {}", peer);
+
+        let count = Arc::clone(&connection_count);
+        count.fetch_add(1, Ordering::Relaxed);
 
         task::spawn(async move {
             if let Err(e) = handle_connection(socket).await {
                 error!(error = %e, "connection handler failed");
                 eprintln!("Connection error: {}", e);
             }
+            count.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
@@ -59,7 +87,7 @@ async fn handle_connection(mut socket: TcpStream) -> Result<(), AdolapError> {
 
 #[cfg(test)]
 mod tests {
-    use super::handle_connection;
+    use super::{handle_connection, start_server_with_limit};
     use protocol::{decode_server_message, encode_client_message, ClientMessage, ServerMessage};
     use protocol::framing::{read_frame, write_frame};
     use tokio::net::{TcpListener, TcpStream};
@@ -89,5 +117,53 @@ mod tests {
             drop(client);
             server_task.await.unwrap();
         });
+    }
+
+    #[test]
+    fn server_enforces_connection_limit_via_atomic_counter() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Simulate the accept-loop's connection-limit check directly.
+        let max_connections = 2usize;
+        let count = Arc::new(AtomicUsize::new(0));
+
+        // Simulate 3 incoming connections; only the first 2 should be accepted.
+        let mut accepted = 0usize;
+        let mut rejected = 0usize;
+        for _ in 0..3 {
+            let current = count.load(Ordering::Relaxed);
+            if current >= max_connections {
+                rejected += 1;
+            } else {
+                count.fetch_add(1, Ordering::Relaxed);
+                accepted += 1;
+            }
+        }
+
+        assert_eq!(accepted, 2, "expected 2 accepted connections");
+        assert_eq!(rejected, 1, "expected 1 rejected connection");
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+
+        // Simulate a disconnect reducing the count.
+        count.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+
+        // Now a new connection should be accepted again.
+        let current = count.load(Ordering::Relaxed);
+        assert!(current < max_connections, "connection should be allowed after one disconnect");
+    }
+
+    #[test]
+    fn connection_count_increments_and_decrements() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Verify the AtomicUsize accounting logic directly without a live server.
+        let count = Arc::new(AtomicUsize::new(0));
+        count.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        count.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 }

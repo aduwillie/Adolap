@@ -251,6 +251,7 @@ The `docs/` directory is organized like a short database book plus one architect
 | [docs/04_query_language_and_planning.md](docs/04_query_language_and_planning.md) | AQL syntax, parsing, logical plans, optimization, binding, and physical planning. |
 | [docs/05_protocol_server_and_cli.md](docs/05_protocol_server_and_cli.md) | Binary protocol, TCP framing, request lifecycle, server dispatch, and CLI behavior. |
 | [docs/06_end_to_end_walkthrough.md](docs/06_end_to_end_walkthrough.md) | A tutorial-style chapter with sample data, queries, inspection commands, and architecture mapping. |
+| [docs/08_trade_offs_and_comparisons.md](docs/08_trade_offs_and_comparisons.md) | Design trade-offs, comparisons to ClickHouse, DuckDB, Druid, Pinot, Snowflake, and Trino, and a production-readiness risk register. |
 
 ## Recommended reading order
 
@@ -263,6 +264,7 @@ If you want to understand the codebase deeply, use this sequence:
 5. Study planning in [docs/04_query_language_and_planning.md](docs/04_query_language_and_planning.md).
 6. Study networking and tooling in [docs/05_protocol_server_and_cli.md](docs/05_protocol_server_and_cli.md).
 7. Run the tutorial in [docs/06_end_to_end_walkthrough.md](docs/06_end_to_end_walkthrough.md).
+8. Read [docs/08_trade_offs_and_comparisons.md](docs/08_trade_offs_and_comparisons.md) for design trade-offs, database comparisons, and the production-readiness risk register.
 
 ## Current status
 

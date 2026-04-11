@@ -15,3 +15,8 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "exec_benches"
+harness = false
