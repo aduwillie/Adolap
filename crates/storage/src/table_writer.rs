@@ -100,6 +100,9 @@ impl TableWriter {
     }
 
     pub async fn clear_data(&self) -> Result<(), AdolapError> {
+        // Invalidate cached segments, bloom filters, etc. for this table.
+        crate::read_cache::global_cache().invalidate_prefix(&self.table_dir);
+
         let mut entries = match fs::read_dir(&self.table_dir).await {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),

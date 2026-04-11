@@ -40,11 +40,20 @@ impl<'a> SegmentReader<'a> {
         segment_dir: &Path,
         predicate: Option<&Predicate>,
     ) -> Result<Vec<RecordBatch>, AdolapError> {
-        // 1. Load segment.meta
+        // 1. Load segment.meta (cached — segment metadata is immutable)
         let meta_path = segment_dir.join(SEGMENT_METADATA_FILE_NAME);
-        let meta_bytes = fs::read(&meta_path).await?;
-        let segment_meta: SegmentMetadata = postcard::from_bytes(&meta_bytes)
-            .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize segment metadata: {}", e)))?;
+        let segment_meta = {
+            let cache = crate::read_cache::global_cache();
+            if let Some(cached) = cache.get_segment_metadata(&meta_path) {
+                cached
+            } else {
+                let meta_bytes = fs::read(&meta_path).await?;
+                let meta: SegmentMetadata = postcard::from_bytes(&meta_bytes)
+                    .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize segment metadata: {}", e)))?;
+                cache.put_segment_metadata(meta_path, meta.clone());
+                meta
+            }
+        };
 
         let mut batches = Vec::new();
         let projected_indices = self.projected_indices()?;
@@ -186,9 +195,18 @@ impl<'a> SegmentReader<'a> {
         };
 
         let bloom_path = rg_dir.join(bloom_file);
-        let bloom_bytes = std::fs::read(&bloom_path)?;
-        let bloom: crate::bloom::BloomFilter = postcard::from_bytes(&bloom_bytes)
-            .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize bloom filter: {}", e)))?;
+
+        // Bloom filters are immutable once written — use the cache.
+        let cache = crate::read_cache::global_cache();
+        let bloom = if let Some(cached) = cache.get_bloom_filter(&bloom_path) {
+            cached
+        } else {
+            let bloom_bytes = std::fs::read(&bloom_path)?;
+            let loaded: crate::bloom::BloomFilter = postcard::from_bytes(&bloom_bytes)
+                .map_err(|e| AdolapError::Serialization(format!("Cannot deserialize bloom filter: {}", e)))?;
+            cache.put_bloom_filter(bloom_path, loaded.clone());
+            loaded
+        };
 
         Ok(match value {
             ColumnValue::Utf8(s) => bloom.might_contain(s),

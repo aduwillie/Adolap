@@ -28,6 +28,7 @@ pub mod compression;
 
 pub mod stats;
 pub mod null;
+pub mod read_cache;
 
 pub mod schema;
 pub mod record_batch;
